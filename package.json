@@ -33,16 +33,16 @@
     "@nut-tree-fork/nut-js": "^4.2.6",
     "express": "^5.1.0",
     "sharp": "^0.35.3",
-    "zod": "^4.1.13"
+    "zod": "^4.3.6"
   },
   "devDependencies": {
     "@tsconfig/node-lts": "^24.0.0",
     "@types/express": "^5.0.6",
-    "@types/node": "^24.10.1",
-    "eslint": "^9.39.1",
+    "@types/node": "^25.3.0",
+    "eslint": "^9.39.4",
     "eslint-config-domdomegg": "^2.0.9",
     "tsconfig-domdomegg": "^1.0.0",
     "typescript": "^5.9.3",
-    "vitest": "^4.0.15"
+    "vitest": "^4.0.18"
   }
 }

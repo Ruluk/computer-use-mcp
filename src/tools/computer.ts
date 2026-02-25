@@ -190,6 +190,9 @@ export function registerComputer(server: McpServer): void {
 		async (args) => {
 			const {action, coordinate, text} = args as {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; text?: string};
 
+			// Log action for security auditing
+			console.error(`[Computer Tool] Action: ${action}${coordinate ? ` at (${coordinate[0]}, ${coordinate[1]})` : ''}${text ? ` with text: "${text}"` : ''}`);
+
 			// Scale coordinates from API image space to logical screen space
 			let scaledCoordinate = coordinate;
 			if (coordinate) {

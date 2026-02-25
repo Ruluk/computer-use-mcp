@@ -48,13 +48,13 @@ function setupSignalHandlers(cleanup: () => Promise<void>): void {
 		app.post('/mcp', async (req, res) => {
 			const server = createServer();
 			const httpTransport = new StreamableHTTPServerTransport({
-				sessionIdGenerator: undefined,
 				enableJsonResponse: true,
-			});
-			res.on('close', () => {
+		});
+
+		res.on('close', () => {
 				void server.close();
 			});
-			await server.connect(httpTransport);
+			await server.connect(httpTransport as any);
 			await httpTransport.handleRequest(req, res, req.body);
 		});
 
