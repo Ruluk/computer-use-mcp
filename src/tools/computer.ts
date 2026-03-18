@@ -363,38 +363,42 @@ export function registerComputer(server: McpServer): void {
 					}
 
 					// Parse direction and optional amount from text (e.g. "down" or "down:5")
-					const parts = text.split(':');
-					const direction = parts[0];
-					const amountStr = parts[1];
-					const amount = amountStr ? parseInt(amountStr, 10) : 300;
+					const scrollCommands = text.split(',');
 
-					if (!direction) {
-						throw new Error('Scroll direction required');
-					}
+					for (const cmd of scrollCommands) {
+						const parts = cmd.trim().split(':');
+						const direction = parts[0];
+						const amountStr = parts[1];
+						const amount = amountStr ? parseInt(amountStr, 10) : 300;
 
-					if (amountStr !== undefined && (isNaN(amount) || amount <= 0)) {
-						throw new Error(`Invalid scroll amount: ${amountStr}`);
-					}
+						if (!direction) {
+							throw new Error('Scroll direction required');
+						}
 
-					// Move to position first
-					await mouse.setPosition(new Point(scaledCoordinate[0], scaledCoordinate[1]));
+						if (amountStr !== undefined && (isNaN(amount) || amount <= 0)) {
+							throw new Error(`Invalid scroll amount: ${amountStr}`);
+						}
 
-					// Scroll in the specified direction
-					switch (direction.toLowerCase()) {
-						case 'up':
-							await mouse.scrollUp(amount);
-							break;
-						case 'down':
-							await mouse.scrollDown(amount);
-							break;
-						case 'left':
-							await mouse.scrollLeft(amount);
-							break;
-						case 'right':
-							await mouse.scrollRight(amount);
-							break;
-						default:
-							throw new Error(`Invalid scroll direction: ${direction}. Use "up", "down", "left", or "right"`);
+						// Move to position first
+						await mouse.setPosition(new Point(scaledCoordinate[0], scaledCoordinate[1]));
+
+						// Scroll in the specified direction
+						switch (direction.toLowerCase()) {
+							case 'up':
+								await mouse.scrollUp(amount);
+								break;
+							case 'down':
+								await mouse.scrollDown(amount);
+								break;
+							case 'left':
+								await mouse.scrollLeft(amount);
+								break;
+							case 'right':
+								await mouse.scrollRight(amount);
+								break;
+							default:
+								throw new Error(`Invalid scroll direction: ${direction}. Use "up", "down", "left", or "right"`);
+						}
 					}
 
 					return jsonResult({ok: true});
