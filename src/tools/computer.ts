@@ -134,6 +134,7 @@ const ActionEnum = z.enum([
 	'scroll',
 	'get_screenshot',
 	'get_cursor_position',
+	'sequence',
 ]);
 
 const actionDescription = `The action to perform. The available actions are:
@@ -146,12 +147,16 @@ const actionDescription = `The action to perform. The available actions are:
 * right_click: Click the right mouse button. If coordinate is provided, moves to that position first.
 * middle_click: Click the middle mouse button. If coordinate is provided, moves to that position first.
 * double_click: Double-click the left mouse button. If coordinate is provided, moves to that position first.
-* scroll: Scroll the screen in a specified direction. Requires coordinate (moves there first) and text parameter with direction: "up", "down", "left", or "right". Optionally append ":N" to scroll N pixels (default 300), e.g. "down:500".
-* get_screenshot: Take a screenshot of the screen.`;
+* scroll: Scroll the screen in a specified direction. Requires coordinate (moves there first) and text parameter with direction: "up", "down", "left", or "right". Optionally append ":N" to scroll N pixels (default 300), e.g. "down:500". Multiple scroll actions can be combined in one call by separating them with commas, e.g. "up:100,down:100".
+* get_screenshot: Take a screenshot of the screen. This can be used as a standalone action or as the last action in a 'sequence'.
+* sequence: Perform a sequence of multiple non-click actions in a single tool call (e.g., move, scroll, and screenshot). Use the "actions" field to provide the array of actions. Clicking or typing actions are not permitted in sequences for safety. The result is the last action's result.
+`;
 
 const toolDescription = `Use a mouse and keyboard to interact with a computer, and take screenshots.
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
+* Efficient Workflow: Use the 'sequence' action to combine multiple non-click operations (mouse_move, scroll, get_screenshot, get_cursor_position) in a single tool call. For example, to navigate to a specific area and view it: move the cursor, scroll, and take a screenshot in one 'sequence' call.
+* Standalone Actions: Actions that change state but are not permitted in sequences (like left_click, type, or key) must be called individually. After such a standalone action, you should always follow up with a 'get_screenshot' call (either standalone or as part of a subsequent sequence) to observe the result.
 * If you see boxes with two letters in them, typing these letters will click that element. Use this instead of other shortcuts or clicking, where possible.
 * Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions. E.g. if you click on Firefox and a window doesn't open, try taking another screenshot.
 * Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.
@@ -181,14 +186,24 @@ export function registerComputer(server: McpServer): void {
 				action: ActionEnum.describe(actionDescription),
 				coordinate: coordinateSchema.optional(),
 				text: z.string().optional().describe('Text to type or key command to execute'),
+				actions: z.array(z.object({
+					action: ActionEnum,
+					coordinate: z.array(z.number()).length(2).optional(),
+					text: z.string().optional(),
+				})).optional().describe('A sequence of actions to perform. Only non-click actions are allowed in sequences.'),
 			}).strict(),
 			// Note: No outputSchema because this tool returns varying content types including images
 			annotations: {
 				readOnlyHint: false,
 			},
 		},
-		async (args) => {
-			const {action, coordinate, text} = args as {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; text?: string};
+		async function performAction(args: any): Promise<any> {
+			const {action, coordinate, text, actions} = args as {
+				action: z.infer<typeof ActionEnum>;
+				coordinate?: [number, number];
+				text?: string;
+				actions?: Array<{action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; text?: string}>;
+			};
 
 			// Log action for security auditing
 			console.error(`[Computer Tool] Action: ${action}${coordinate ? ` at (${coordinate[0]}, ${coordinate[1]})` : ''}${text ? ` with text: "${text}"` : ''}`);
@@ -212,6 +227,39 @@ export function registerComputer(server: McpServer): void {
 
 			// Implement system actions using nut-js
 			switch (action) {
+				case 'sequence': {
+					if (coordinate || text) {
+						throw new Error('Coordinates and text are not allowed when action is "sequence". Use the "actions" field instead.');
+					}
+
+					if (!actions || actions.length === 0) {
+						throw new Error('Actions array required for sequence');
+					}
+
+					// Security check for sequences
+					const forbiddenActions: Array<z.infer<typeof ActionEnum>> = [
+						'left_click',
+						'left_click_drag',
+						'right_click',
+						'middle_click',
+						'double_click',
+						'key',
+						'type',
+					];
+
+					for (const seqAction of actions) {
+						if (forbiddenActions.includes(seqAction.action)) {
+							throw new Error(`Action "${seqAction.action}" is not allowed in a sequence for safety reasons.`);
+						}
+					}
+
+					let lastResult;
+					for (const a of actions) {
+						lastResult = await performAction(a);
+					}
+					return lastResult;
+				}
+
 				case 'key': {
 					if (!text) {
 						throw new Error('Text required for key');
