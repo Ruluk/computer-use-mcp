@@ -28,6 +28,14 @@ We implement a near identical computer use tool to [Anthropic's official compute
 
 This talks to your computer using [nut.js](https://github.com/nut-tree/nut.js)
 
+To click, wait for the interface to update, and see the result in one request, call the `computer` tool with:
+
+```json
+{"action":"sequence","actions":[{"action":"left_click","coordinate":[400,300]},{"action":"wait","duration_ms":1000},{"action":"get_screenshot"}]}
+```
+
+`wait` accepts 1–60000 milliseconds. A sequence can contain at most one click, drag, key, or type action, even if it includes screenshots: the caller cannot verify an intermediate screenshot until the request finishes. A final screenshot is optional but recommended. Multiple screenshots in one sequence are returned together.
+
 ## Contributing
 
 Pull requests are welcomed on GitHub! To get started:

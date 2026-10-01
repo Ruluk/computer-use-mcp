@@ -1,4 +1,5 @@
 import type {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
+import type {CallToolResult} from '@modelcontextprotocol/sdk/types.js';
 import {z} from 'zod';
 import {
 	mouse,
@@ -12,6 +13,7 @@ import {execFileSync} from 'node:child_process';
 import {readFileSync, unlinkSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {setTimeout as sleep} from 'node:timers/promises';
 import Jimp from 'jimp';
 import sharp from 'sharp';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
@@ -134,6 +136,7 @@ const ActionEnum = z.enum([
 	'scroll',
 	'get_screenshot',
 	'get_cursor_position',
+	'wait',
 	'sequence',
 ]);
 
@@ -148,15 +151,15 @@ const actionDescription = `The action to perform. The available actions are:
 * middle_click: Click the middle mouse button. If coordinate is provided, moves to that position first.
 * double_click: Double-click the left mouse button. If coordinate is provided, moves to that position first.
 * scroll: Scroll the screen in a specified direction. Requires coordinate (moves there first) and text parameter with direction: "up", "down", "left", or "right". Optionally append ":N" to scroll N pixels (default 300), e.g. "down:500". Multiple scroll actions can be combined in one call by separating them with commas, e.g. "up:100,down:100".
-* get_screenshot: Take a screenshot of the screen. This can be used as a standalone action or as the last action in a 'sequence'.
-* sequence: Perform a sequence of multiple non-click actions in a single tool call (e.g., move, scroll, and screenshot). Use the "actions" field to provide the array of actions. Clicking or typing actions are not permitted in sequences for safety. The result is the last action's result.
+* get_screenshot: Take a screenshot of the screen. This can be used as a standalone action or in a 'sequence'.
+* wait: Pause for duration_ms milliseconds (a positive integer up to 60000).
+* sequence: Perform actions in order in a single tool call. Use the "actions" field to provide the array. At most one click, drag, key, or type action is allowed per sequence, since intermediate screenshots cannot be verified before the call ends. A screenshot afterward is recommended, but optional. All screenshots in a sequence are returned; otherwise the result is the last action's result.
 `;
 
 const toolDescription = `Use a mouse and keyboard to interact with a computer, and take screenshots.
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
-* Efficient Workflow: Use the 'sequence' action to combine multiple non-click operations (mouse_move, scroll, get_screenshot, get_cursor_position) in a single tool call. For example, to navigate to a specific area and view it: move the cursor, scroll, and take a screenshot in one 'sequence' call.
-* Standalone Actions: Actions that change state but are not permitted in sequences (like left_click, type, or key) must be called individually. After such a standalone action, you should always follow up with a 'get_screenshot' call (either standalone or as part of a subsequent sequence) to observe the result.
+* Efficient Workflow: Use 'sequence' to combine actions such as clicking, waiting, and taking a screenshot in a single tool call. At most one click, drag, key, or type action is allowed in a sequence. A screenshot afterward is highly recommended; another such action requires a new tool call so you can inspect the result first.
 * If you see boxes with two letters in them, typing these letters will click that element. Use this instead of other shortcuts or clicking, where possible.
 * Some applications may take time to start or process actions, so you may need to wait and take successive screenshots to see the results of your actions. E.g. if you click on Firefox and a window doesn't open, try taking another screenshot.
 * Whenever you intend to move the cursor to click on an element like an icon, you should consult a screenshot to determine the coordinates of the element before moving the cursor.
@@ -175,6 +178,7 @@ const coordinateSchema = z
 	.array(z.number())
 	.length(2)
 	.describe('(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates');
+const durationSchema = z.number().int().positive().max(60_000);
 
 export function registerComputer(server: McpServer): void {
 	server.registerTool(
@@ -186,11 +190,13 @@ export function registerComputer(server: McpServer): void {
 				action: ActionEnum.describe(actionDescription),
 				coordinate: coordinateSchema.optional(),
 				text: z.string().optional().describe('Text to type or key command to execute'),
+				duration_ms: durationSchema.optional().describe('Milliseconds to wait (1 to 60000); required for wait'),
 				actions: z.array(z.object({
 					action: ActionEnum,
 					coordinate: z.array(z.number()).length(2).optional(),
 					text: z.string().optional(),
-				})).optional().describe('A sequence of actions to perform. Only non-click actions are allowed in sequences.'),
+					duration_ms: durationSchema.optional(),
+				})).optional().describe('Actions to perform in order; at most one click, drag, key, or type action per sequence.'),
 			}).strict(),
 			// Note: No outputSchema because this tool returns varying content types including images
 			annotations: {
@@ -198,15 +204,19 @@ export function registerComputer(server: McpServer): void {
 			},
 		},
 		async function performAction(args: any): Promise<any> {
-			const {action, coordinate, text, actions} = args as {
+			const {action, coordinate, text, duration_ms, actions} = args as {
 				action: z.infer<typeof ActionEnum>;
 				coordinate?: [number, number];
 				text?: string;
-				actions?: Array<{action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; text?: string}>;
+				duration_ms?: number;
+				actions?: {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; text?: string; duration_ms?: number}[];
 			};
 
 			// Log action for security auditing
 			console.error(`[Computer Tool] Action: ${action}${coordinate ? ` at (${coordinate[0]}, ${coordinate[1]})` : ''}${text ? ` with text: "${text}"` : ''}`);
+			if (action !== 'wait' && duration_ms !== undefined) {
+				throw new Error('duration_ms is only allowed for wait');
+			}
 
 			// Scale coordinates from API image space to logical screen space
 			let scaledCoordinate = coordinate;
@@ -236,8 +246,7 @@ export function registerComputer(server: McpServer): void {
 						throw new Error('Actions array required for sequence');
 					}
 
-					// Security check for sequences
-					const forbiddenActions: Array<z.infer<typeof ActionEnum>> = [
+					const consequentialActions: z.infer<typeof ActionEnum>[] = [
 						'left_click',
 						'left_click_drag',
 						'right_click',
@@ -247,17 +256,56 @@ export function registerComputer(server: McpServer): void {
 						'type',
 					];
 
+					let consequentialCount = 0;
 					for (const seqAction of actions) {
-						if (forbiddenActions.includes(seqAction.action)) {
-							throw new Error(`Action "${seqAction.action}" is not allowed in a sequence for safety reasons.`);
+						if (seqAction.action === 'sequence') {
+							throw new Error('Nested sequences are not allowed');
+						}
+
+						if (seqAction.action === 'wait' && (seqAction.duration_ms === undefined || seqAction.coordinate || seqAction.text)) {
+							throw new Error('wait requires duration_ms and does not accept coordinate or text');
+						}
+
+						if (seqAction.action !== 'wait' && seqAction.duration_ms !== undefined) {
+							throw new Error('duration_ms is only allowed for wait');
+						}
+
+						if (consequentialActions.includes(seqAction.action)) {
+							consequentialCount += 1;
+							if (consequentialCount > 1) {
+								throw new Error('Only one click, drag, key, or type action is allowed per sequence');
+							}
 						}
 					}
 
 					let lastResult;
+					const screenshots: CallToolResult['content'] = [];
 					for (const a of actions) {
+						// eslint-disable-next-line no-await-in-loop -- Actions must finish before the next one starts.
 						lastResult = await performAction(a);
+						if (a.action === 'get_screenshot') {
+							screenshots.push(...lastResult.content);
+						}
 					}
-					return lastResult;
+
+					if (screenshots.length === 0) {
+						return lastResult;
+					}
+
+					if (actions.at(-1)?.action !== 'get_screenshot') {
+						screenshots.push(...lastResult.content);
+					}
+
+					return {...lastResult, content: screenshots};
+				}
+
+				case 'wait': {
+					if (duration_ms === undefined || coordinate || text || actions) {
+						throw new Error('wait requires duration_ms and does not accept coordinate, text, or actions');
+					}
+
+					await sleep(duration_ms);
+					return jsonResult({ok: true});
 				}
 
 				case 'key': {
