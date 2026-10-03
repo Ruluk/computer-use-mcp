@@ -36,6 +36,28 @@ To click, wait for the interface to update, and see the result in one request, c
 
 `wait` accepts 1–60000 milliseconds. A sequence can contain at most one click, drag, key, or type action, even if it includes screenshots: the caller cannot verify an intermediate screenshot until the request finishes. A final screenshot is optional but recommended. Multiple screenshots in one sequence are returned together.
 
+### Coordinates
+
+By default, positions use `coordinate_space: "api"`: a reduced coordinate grid based on the screenshot size limits. You can omit the field to keep that behavior.
+
+To send a desktop point directly, use `"desktop"`:
+
+```json
+{"action":"left_click","coordinate":[850,460],"coordinate_space":"desktop"}
+```
+
+Desktop points are rounded to whole numbers and must fit inside the display. They are not always the same as captured pixels on a high-DPI screen.
+
+Clients must convert positions found in screenshots into desktop points themselves. The server does not do that conversion or remember the previous screenshot.
+
+To get the cursor position in that same grid:
+
+```json
+{"action":"get_cursor_position","coordinate_space":"desktop"}
+```
+
+Cursor queries return `{x, y}` without moving the mouse. Both coordinate spaces work on individual sequence steps. Only use `coordinate_space` on mouse actions with a `coordinate` or on cursor queries—not on the sequence itself.
+
 ## Contributing
 
 Pull requests are welcomed on GitHub! To get started:

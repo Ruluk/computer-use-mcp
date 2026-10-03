@@ -143,7 +143,7 @@ const ActionEnum = z.enum([
 const actionDescription = `The action to perform. The available actions are:
 * key: Press a key or key-combination on the keyboard.
 * type: Type a string of text on the keyboard.
-* get_cursor_position: Get the current (x, y) pixel coordinate of the cursor on the screen.
+* get_cursor_position: Get the current cursor position as {x, y} in coordinate_space: api (default, legacy scaled coordinates) or desktop (desktop grid). This does not move the cursor.
 * mouse_move: Move the cursor to a specified (x, y) pixel coordinate on the screen.
 * left_click: Click the left mouse button. If coordinate is provided, moves to that position first.
 * left_click_drag: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.
@@ -158,6 +158,7 @@ const actionDescription = `The action to perform. The available actions are:
 
 const toolDescription = `Use a mouse and keyboard to interact with a computer, and take screenshots.
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
+* Coordinate spaces: mouse actions with a coordinate and get_cursor_position accept coordinate_space: api (default, legacy reduced-image grid) or desktop (desktop grid). Clients—not the server—convert screenshot positions into desktop points; the server does not infer origin or scale from a previous screenshot. Desktop units can differ from native capture pixels on high-DPI displays.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
 * Efficient Workflow: Use 'sequence' to combine actions such as clicking, waiting, and taking a screenshot in a single tool call. At most one click, drag, key, or type action is allowed in a sequence. A screenshot afterward is highly recommended; another such action requires a new tool call so you can inspect the result first.
 * If you see boxes with two letters in them, typing these letters will click that element. Use this instead of other shortcuts or clicking, where possible.
@@ -177,7 +178,9 @@ Using the crosshair:
 const coordinateSchema = z
 	.array(z.number())
 	.length(2)
-	.describe('(x, y): The x (pixels from the left edge) and y (pixels from the top edge) coordinates');
+	.describe('(x, y): Position from the left/top edge in coordinate_space (default: api). Desktop points are rounded and checked against display bounds.');
+const coordinateSpaceSchema = z.enum(['api', 'desktop'])
+	.describe('Coordinate grid for mouse actions with coordinate and get_cursor_position: api (default) retains legacy reduced-image scaling; desktop uses the desktop grid directly. Cursor queries return {x, y} in the requested grid. Clients must convert screenshot positions themselves; the server does not map them from a previous screenshot.');
 const durationSchema = z.number().int().positive().max(60_000);
 
 export function registerComputer(server: McpServer): void {
@@ -189,11 +192,13 @@ export function registerComputer(server: McpServer): void {
 			inputSchema: z.object({
 				action: ActionEnum.describe(actionDescription),
 				coordinate: coordinateSchema.optional(),
+				coordinate_space: coordinateSpaceSchema.optional(),
 				text: z.string().optional().describe('Text to type or key command to execute'),
 				duration_ms: durationSchema.optional().describe('Milliseconds to wait (1 to 60000); required for wait'),
 				actions: z.array(z.object({
 					action: ActionEnum,
-					coordinate: z.array(z.number()).length(2).optional(),
+					coordinate: coordinateSchema.optional(),
+					coordinate_space: coordinateSpaceSchema.optional(),
 					text: z.string().optional(),
 					duration_ms: durationSchema.optional(),
 				})).optional().describe('Actions to perform in order; at most one click, drag, key, or type action per sequence.'),
@@ -204,12 +209,13 @@ export function registerComputer(server: McpServer): void {
 			},
 		},
 		async function performAction(args: any): Promise<any> {
-			const {action, coordinate, text, duration_ms, actions} = args as {
+			const {action, coordinate, coordinate_space, text, duration_ms, actions} = args as {
 				action: z.infer<typeof ActionEnum>;
 				coordinate?: [number, number];
+				coordinate_space?: z.infer<typeof coordinateSpaceSchema>;
 				text?: string;
 				duration_ms?: number;
-				actions?: {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; text?: string; duration_ms?: number}[];
+				actions?: {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; coordinate_space?: z.infer<typeof coordinateSpaceSchema>; text?: string; duration_ms?: number}[];
 			};
 
 			// Log action for security auditing
@@ -218,10 +224,12 @@ export function registerComputer(server: McpServer): void {
 				throw new Error('duration_ms is only allowed for wait');
 			}
 
-			// Scale coordinates from API image space to logical screen space
+			validateCoordinateSpace(args);
+
+			// Preserve legacy API scaling unless desktop coordinates are explicit
 			let scaledCoordinate = coordinate;
 			if (coordinate) {
-				const scale = await getApiToLogicalScale();
+				const scale = coordinate_space === 'desktop' ? 1 : await getApiToLogicalScale();
 				scaledCoordinate = [
 					Math.round(coordinate[0] * scale),
 					Math.round(coordinate[1] * scale),
@@ -258,6 +266,7 @@ export function registerComputer(server: McpServer): void {
 
 					let consequentialCount = 0;
 					for (const seqAction of actions) {
+						validateCoordinateSpace(seqAction);
 						if (seqAction.action === 'sequence') {
 							throw new Error('Nested sequences are not allowed');
 						}
@@ -336,9 +345,8 @@ export function registerComputer(server: McpServer): void {
 
 				case 'get_cursor_position': {
 					const pos = await mouse.getPosition();
-					const scale = await getApiToLogicalScale();
-					// Return coordinates in API image space (scaled down from logical)
-					// so Claude can correlate with what it sees in screenshots
+					const scale = coordinate_space === 'desktop' ? 1 : await getApiToLogicalScale();
+					// Default to API image space; desktop queries use the desktop grid
 					return jsonResult({
 						x: Math.round(pos.x / scale),
 						y: Math.round(pos.y / scale),
@@ -543,4 +551,12 @@ export function registerComputer(server: McpServer): void {
 			}
 		},
 	);
+}
+
+function validateCoordinateSpace(args: {action: string; coordinate?: number[]; coordinate_space?: string}): void {
+	const mouseActions = ['double_click', 'left_click', 'left_click_drag', 'middle_click', 'mouse_move', 'right_click', 'scroll'];
+	const isCursorQuery = args.action === 'get_cursor_position' && !args.coordinate;
+	if (args.coordinate_space !== undefined && !isCursorQuery && (!args.coordinate || !mouseActions.includes(args.action))) {
+		throw new Error('coordinate_space is only allowed for mouse actions with coordinate or get_cursor_position without coordinate');
+	}
 }
