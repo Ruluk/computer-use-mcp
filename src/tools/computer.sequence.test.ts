@@ -32,6 +32,7 @@ vi.mock('@nut-tree-fork/nut-js', async (importOriginal) => ({
 		height: vi.fn(async () => 1000),
 		grab: vi.fn(async () => {
 			events.push({action: 'screenshot', at: Date.now()});
+			return {width: 1000, height: 1000, pixelDensity: {scaleX: 1, scaleY: 1}};
 		}),
 	},
 	imageToJimp: vi.fn(() => ({

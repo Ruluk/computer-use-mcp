@@ -18,21 +18,36 @@ import Jimp from 'jimp';
 import sharp from 'sharp';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
+import {screenshotMetadata} from './screenshot.js';
 
 /**
  * Grab the screen, falling back to the macOS `screencapture` CLI if nut-js fails
  * (e.g. on macOS 26+ where CGDisplayCreateImageForRect was removed).
  */
-async function grabScreen(): Promise<ReturnType<typeof imageToJimp>> {
+async function grabScreen(): Promise<{
+	height: number;
+	image: ReturnType<typeof imageToJimp>;
+	scaleX?: number;
+	scaleY?: number;
+	width: number;
+}> {
 	try {
-		return imageToJimp(await screen.grab());
+		const captured = await screen.grab();
+		return {
+			height: captured.height,
+			image: imageToJimp(captured),
+			scaleX: captured.pixelDensity.scaleX,
+			scaleY: captured.pixelDensity.scaleY,
+			width: captured.width,
+		};
 	} catch {
-		// Fallback: use screencapture CLI (macOS only)
+		// Fallback: use screencapture CLI (macOS only). Density is unknown until that path reports it.
 		const tmpPath = join(tmpdir(), `computer-use-mcp-${Date.now()}.png`);
 		try {
 			execFileSync('screencapture', ['-x', tmpPath]);
 			const buffer = readFileSync(tmpPath);
-			return (await Jimp.read(buffer)) as unknown as ReturnType<typeof imageToJimp>;
+			const image = (await Jimp.read(buffer)) as unknown as ReturnType<typeof imageToJimp>;
+			return {height: image.getHeight(), image, width: image.getWidth()};
 		} finally {
 			try {
 				unlinkSync(tmpPath);
@@ -143,7 +158,7 @@ const ActionEnum = z.enum([
 const actionDescription = `The action to perform. The available actions are:
 * key: Press a key or key-combination on the keyboard.
 * type: Type a string of text on the keyboard.
-* get_cursor_position: Get the current cursor position as {x, y} in coordinate_space: api (default, legacy scaled coordinates) or desktop (desktop grid). This does not move the cursor.
+* get_cursor_position: Get the current cursor position as {x, y} in coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). This does not move the cursor.
 * mouse_move: Move the cursor to a specified (x, y) pixel coordinate on the screen.
 * left_click: Click the left mouse button. If coordinate is provided, moves to that position first.
 * left_click_drag: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.
@@ -151,14 +166,15 @@ const actionDescription = `The action to perform. The available actions are:
 * middle_click: Click the middle mouse button. If coordinate is provided, moves to that position first.
 * double_click: Double-click the left mouse button. If coordinate is provided, moves to that position first.
 * scroll: Scroll the screen in a specified direction. Requires coordinate (moves there first) and text parameter with direction: "up", "down", "left", or "right". Optionally append ":N" to scroll N pixels (default 300), e.g. "down:500". Multiple scroll actions can be combined in one call by separating them with commas, e.g. "up:100,down:100".
-* get_screenshot: Take a screenshot of the screen. This can be used as a standalone action or in a 'sequence'.
+* get_screenshot: Take a screenshot of the screen. The text before the image gives its size, desktop rectangle, captured pixel size, and desktop_per_image_pixel. Convert image points to desktop points yourself. This can be used as a standalone action or in a sequence.
 * wait: Pause for duration_ms milliseconds (a positive integer up to 60000).
 * sequence: Perform actions in order in a single tool call. Use the "actions" field to provide the array. At most one click, drag, key, or type action is allowed per sequence, since intermediate screenshots cannot be verified before the call ends. A screenshot afterward is recommended, but optional. All screenshots in a sequence are returned; otherwise the result is the last action's result.
 `;
 
 const toolDescription = `Use a mouse and keyboard to interact with a computer, and take screenshots.
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
-* Coordinate spaces: mouse actions with a coordinate and get_cursor_position accept coordinate_space: api (default, legacy reduced-image grid) or desktop (desktop grid). Clients—not the server—convert screenshot positions into desktop points; the server does not infer origin or scale from a previous screenshot. Desktop units can differ from native capture pixels on high-DPI displays.
+* Coordinate spaces: mouse actions with a coordinate and get_cursor_position accept coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). Desktop units can differ from captured pixels on a high-DPI display.
+* Screenshot geometry: each screenshot reports image size, desktop_region, capture size, and desktop_per_image_pixel. Convert with desktop_x = desktop_region.left + image_x * desktop_per_image_pixel.x, and the same for y. Round to a desktop point inside that rectangle and send coordinate_space: desktop. The x and y factors use the actual image size, so they can differ. The server does not remember the screenshot.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
 * Efficient Workflow: Use 'sequence' to combine actions such as clicking, waiting, and taking a screenshot in a single tool call. At most one click, drag, key, or type action is allowed in a sequence. A screenshot afterward is highly recommended; another such action requires a new tool call so you can inspect the result first.
 * If you see boxes with two letters in them, typing these letters will click that element. Use this instead of other shortcuts or clicking, where possible.
@@ -180,7 +196,7 @@ const coordinateSchema = z
 	.length(2)
 	.describe('(x, y): Position from the left/top edge in coordinate_space (default: api). Desktop points are rounded and checked against display bounds.');
 const coordinateSpaceSchema = z.enum(['api', 'desktop'])
-	.describe('Coordinate grid for mouse actions with coordinate and get_cursor_position: api (default) retains legacy reduced-image scaling; desktop uses the desktop grid directly. Cursor queries return {x, y} in the requested grid. Clients must convert screenshot positions themselves; the server does not map them from a previous screenshot.');
+	.describe('Coordinate grid for mouse actions with coordinate and get_cursor_position: api (default) uses the reduced screenshot grid; desktop uses the desktop grid directly. Cursor queries return {x, y} in the requested grid. Convert screenshot points with that screenshot\'s geometry; the server does not map them from a previous screenshot.');
 const durationSchema = z.number().int().positive().max(60_000);
 
 export function registerComputer(server: McpServer): void {
@@ -465,7 +481,10 @@ export function registerComputer(server: McpServer): void {
 					const cursorPos = await mouse.getPosition();
 
 					// Capture the entire screen (may be at Retina resolution)
-					const image = await grabScreen();
+					const captured = await grabScreen();
+					const {image} = captured;
+					const desktopWidth = await screen.width();
+					const desktopHeight = await screen.height();
 
 					// Then resize to fit within API limits
 					const apiScaleFactor = getSizeToApiScale(image.getWidth(), image.getHeight());
@@ -533,12 +552,16 @@ export function registerComputer(server: McpServer): void {
 						content: [
 							{
 								type: 'text',
-								text: JSON.stringify({
-									// Report the image dimensions - Claude should use coordinates within this space
-									// These may differ from the actual display due to scaling for API limits
-									image_width: imageWidth,
-									image_height: imageHeight,
-								}),
+								text: JSON.stringify(screenshotMetadata({
+									captureHeight: captured.height,
+									captureWidth: captured.width,
+									desktopHeight,
+									desktopWidth,
+									imageHeight,
+									imageWidth,
+									scaleX: captured.scaleX,
+									scaleY: captured.scaleY,
+								})),
 							},
 							{
 								type: 'image',

@@ -50,6 +50,15 @@ Desktop points are rounded to whole numbers and must fit inside the display. The
 
 Clients must convert positions found in screenshots into desktop points themselves. The server does not do that conversion or remember the previous screenshot.
 
+Each screenshot's text, before the image, includes the numbers for that conversion:
+
+```text
+desktop_x = desktop_region.left + image_x * desktop_per_image_pixel.x
+desktop_y = desktop_region.top + image_y * desktop_per_image_pixel.y
+```
+
+`desktop_per_image_pixel` uses the actual returned image size. The x and y factors can differ because resizing rounds each side separately. Round the result to a whole desktop point and keep it inside `desktop_region`. A default screenshot covers the whole desktop, so that rectangle starts at 0, 0. `capture_width` and `capture_height` are the pixels captured before resizing; on a high-DPI display they can be larger than the desktop size.
+
 To get the cursor position in that same grid:
 
 ```json
