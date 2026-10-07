@@ -15,10 +15,11 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
 import Jimp from 'jimp';
-import sharp from 'sharp';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
-import {drawCrosshair, screenshotMetadata} from './screenshot.js';
+import {
+	drawCrosshair, encodeScreenshot, resizeScreenshot, screenshotMetadata,
+} from './screenshot.js';
 
 /**
  * Grab the screen, falling back to the macOS `screencapture` CLI if nut-js fails
@@ -175,6 +176,7 @@ const toolDescription = `Use a mouse and keyboard to interact with a computer, a
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
 * Coordinate spaces: mouse actions with a coordinate and get_cursor_position accept coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). Desktop units can differ from captured pixels on a high-DPI display.
 * Screenshot geometry: each screenshot reports image size, desktop_region, capture size, and desktop_per_image_pixel. Convert with desktop_x = desktop_region.left + image_x * desktop_per_image_pixel.x, and the same for y. Round to a desktop point inside that rectangle and send coordinate_space: desktop. The x and y factors use the actual image size, so they can differ. The server does not remember the screenshot.
+* Screenshot resolution: screenshot.resolution accepts api (default, size-limited) or native (captured dimensions, non-palette PNG). Disable screenshot.include_crosshair for unaltered native pixels. Clients/providers may resize images after delivery; convert coordinates using the delivered image's geometry, not an assumed client-view size.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
 * Efficient Workflow: Use 'sequence' to combine actions such as clicking, waiting, and taking a screenshot in a single tool call. At most one click, drag, key, or type action is allowed in a sequence. A screenshot afterward is highly recommended; another such action requires a new tool call so you can inspect the result first.
 * If you see boxes with two letters in them, typing these letters will click that element. Use this instead of other shortcuts or clicking, where possible.
@@ -200,6 +202,7 @@ const coordinateSpaceSchema = z.enum(['api', 'desktop'])
 const durationSchema = z.number().int().positive().max(60_000);
 const screenshotOptionsSchema = z.object({
 	include_crosshair: z.boolean().optional().describe('Draw the cursor crosshair (default: true).'),
+	resolution: z.enum(['api', 'native']).optional().describe('api (default) retains size limits; native preserves captured dimensions and unannotated pixels. Clients/providers may resize native images; use image geometry to convert points to desktop coordinates.'),
 }).strict().describe('Options for get_screenshot only; set separately on each screenshot step in a sequence.');
 
 export function registerComputer(server: McpServer): void {
@@ -494,35 +497,24 @@ export function registerComputer(server: McpServer): void {
 					const desktopWidth = await screen.width();
 					const desktopHeight = await screen.height();
 
-					// Then resize to fit within API limits
+					const resolution = screenshot?.resolution ?? 'api';
 					const apiScaleFactor = getSizeToApiScale(image.getWidth(), image.getHeight());
-					if (apiScaleFactor < 1) {
-						image.resize(
-							Math.floor(image.getWidth() * apiScaleFactor),
-							Math.floor(image.getHeight() * apiScaleFactor),
-						);
-					}
+					resizeScreenshot(image, resolution, apiScaleFactor);
 
 					const imageWidth = image.getWidth();
 					const imageHeight = image.getHeight();
 					const includeCrosshair = screenshot?.include_crosshair ?? true;
 					if (includeCrosshair) {
-						// Calculate cursor position in API image coordinates
-						// cursor is in logical coords, need to convert to API image coords
-						const scale = await getApiToLogicalScale();
+						// Convert desktop cursor coordinates to the requested image grid
+						const scale = resolution === 'native' ? desktopWidth / imageWidth : await getApiToLogicalScale();
+						const scaleY = resolution === 'native' ? desktopHeight / imageHeight : scale;
 						const cursorInImageX = Math.floor(cursorPos.x / scale);
-						const cursorInImageY = Math.floor(cursorPos.y / scale);
+						const cursorInImageY = Math.floor(cursorPos.y / scaleY);
 
 						drawCrosshair(image, cursorInImageX, cursorInImageY);
 					}
 
-					// Get PNG buffer from Jimp
-					const pngBuffer = await image.getBufferAsync('image/png');
-
-					// Compress PNG using sharp, to fit size limits
-					const optimizedBuffer = await sharp(pngBuffer)
-						.png({quality: 80, compressionLevel: 9})
-						.toBuffer();
+					const optimizedBuffer = await encodeScreenshot(image, resolution);
 
 					// Convert optimized buffer to base64
 					const base64Data = optimizedBuffer.toString('base64');
@@ -539,6 +531,7 @@ export function registerComputer(server: McpServer): void {
 									imageHeight,
 									imageWidth,
 									includeCrosshair,
+									resolution,
 									scaleX: captured.scaleX,
 									scaleY: captured.scaleY,
 								})),

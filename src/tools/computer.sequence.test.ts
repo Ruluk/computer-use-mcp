@@ -124,6 +124,7 @@ describe('computer sequences', () => {
 		{action: 'mouse_move', coordinate: [100, 200], screenshot: {include_crosshair: false}},
 		{action: 'get_screenshot', screenshot: {include_crosshair: 'false'}},
 		{action: 'get_screenshot', screenshot: {unsupported: true}},
+		{action: 'get_screenshot', screenshot: {resolution: 'thumbnail'}},
 	])('rejects invalid sequence step $action before clicking', async (step) => {
 		const result = await callSequence([{action: 'left_click'}, step]);
 
@@ -139,10 +140,10 @@ describe('computer sequences', () => {
 		expect(events).toEqual([]);
 	});
 
-	it('keeps each step-local annotation setting paired with its image', async () => {
+	it('keeps each step-local resolution and annotation setting paired with its image', async () => {
 		const result = await callSequence([
-			{action: 'get_screenshot', screenshot: {include_crosshair: false}},
-			{action: 'get_screenshot'},
+			{action: 'get_screenshot', screenshot: {resolution: 'native', include_crosshair: false}},
+			{action: 'get_screenshot', screenshot: {resolution: 'api'}},
 		]);
 
 		expect(result.isError).not.toBe(true);
@@ -153,7 +154,7 @@ describe('computer sequences', () => {
 			throw new Error('expected screenshot metadata');
 		}
 
-		expect(JSON.parse(first.text)).toMatchObject({include_crosshair: false});
-		expect(JSON.parse(second.text)).toMatchObject({include_crosshair: true});
+		expect(JSON.parse(first.text)).toMatchObject({resolution: 'native', include_crosshair: false});
+		expect(JSON.parse(second.text)).toMatchObject({resolution: 'api', include_crosshair: true});
 	});
 });

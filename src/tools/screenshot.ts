@@ -1,4 +1,5 @@
 import type {imageToJimp} from '@nut-tree-fork/nut-js';
+import sharp from 'sharp';
 
 export function drawCrosshair(image: ReturnType<typeof imageToJimp>, x: number, y: number): void {
 	const imageWidth = image.getWidth();
@@ -23,12 +24,28 @@ export function drawCrosshair(image: ReturnType<typeof imageToJimp>, x: number, 
 	}
 }
 
+export async function encodeScreenshot(image: ReturnType<typeof imageToJimp>, resolution: ScreenshotResolution): Promise<Buffer> {
+	const pngBuffer = await image.getBufferAsync('image/png');
+	return sharp(pngBuffer)
+		.png(resolution === 'api' ? {quality: 80, compressionLevel: 9} : {compressionLevel: 9, palette: false})
+		.toBuffer();
+}
+
+export function resizeScreenshot(image: ReturnType<typeof imageToJimp>, resolution: ScreenshotResolution, apiScaleFactor: number): void {
+	if (resolution === 'api' && apiScaleFactor < 1) {
+		image.resize(
+			Math.floor(image.getWidth() * apiScaleFactor),
+			Math.floor(image.getHeight() * apiScaleFactor),
+		);
+	}
+}
+
 export function screenshotMetadata(input: ScreenshotSource) {
 	assertScreenshotMapping(input);
 	return {
 		image_width: input.imageWidth,
 		image_height: input.imageHeight,
-		resolution: 'api' as const,
+		resolution: input.resolution,
 		desktop_width: input.desktopWidth,
 		desktop_height: input.desktopHeight,
 		desktop_region: {
@@ -63,6 +80,8 @@ function assertScreenshotMapping(input: ScreenshotSource): void {
 	}
 }
 
+export type ScreenshotResolution = 'api' | 'native';
+
 type ScreenshotSource = {
 	captureHeight: number;
 	captureWidth: number;
@@ -71,6 +90,7 @@ type ScreenshotSource = {
 	imageHeight: number;
 	imageWidth: number;
 	includeCrosshair: boolean;
+	resolution: ScreenshotResolution;
 	scaleX?: number | undefined;
 	scaleY?: number | undefined;
 };

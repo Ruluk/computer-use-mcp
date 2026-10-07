@@ -52,6 +52,18 @@ The same options work on individual `get_screenshot` sequence steps, independent
 
 Each image is preceded by its own metadata, including `include_crosshair`. Screenshot options are rejected on other actions or on the sequence itself before any sequence actions run. Disabling the crosshair removes only the tool's marker, not cursor pixels present in the capture. Resizing and compression remain unchanged.
 
+### Screenshot resolution
+
+`screenshot.resolution` accepts `api` (default) or `native`. API mode keeps the existing size limits and PNG compression. Native mode skips resizing and uses non-palette PNG; with the crosshair disabled, captured RGBA pixel values are preserved:
+
+```json
+{"action":"get_screenshot","screenshot":{"resolution":"native","include_crosshair":false}}
+```
+
+Native screenshots still include the crosshair unless disabled. On high-DPI displays their dimensions can exceed desktop dimensions. Each `get_screenshot` sequence step can choose its own resolution; use each image's metadata for coordinate conversion and send the converted point with `coordinate_space: "desktop"`.
+
+Downstream clients or providers may resize native images. The server reports dimensions of the PNG it returns, not a client's subsequently resized view; do not assume those grids match.
+
 ### Coordinates
 
 By default, positions use `coordinate_space: "api"`: a reduced coordinate grid based on the screenshot size limits. You can omit the field to keep that behavior.
