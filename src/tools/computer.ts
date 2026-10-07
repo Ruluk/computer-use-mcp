@@ -7,57 +7,14 @@ import {
 	Point,
 	screen,
 	Button,
-	imageToJimp,
 } from '@nut-tree-fork/nut-js';
 import {execFileSync} from 'node:child_process';
-import {readFileSync, unlinkSync} from 'node:fs';
-import {tmpdir} from 'node:os';
-import {join} from 'node:path';
 import {setTimeout as sleep} from 'node:timers/promises';
-import Jimp from 'jimp';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
 import {
-	drawCrosshair, encodeScreenshot, resizeScreenshot, screenshotMetadata,
+	drawCrosshair, encodeScreenshot, grabScreen, resizeScreenshot, screenshotMetadata,
 } from './screenshot.js';
-
-/**
- * Grab the screen, falling back to the macOS `screencapture` CLI if nut-js fails
- * (e.g. on macOS 26+ where CGDisplayCreateImageForRect was removed).
- */
-async function grabScreen(): Promise<{
-	height: number;
-	image: ReturnType<typeof imageToJimp>;
-	scaleX?: number;
-	scaleY?: number;
-	width: number;
-}> {
-	try {
-		const captured = await screen.grab();
-		return {
-			height: captured.height,
-			image: imageToJimp(captured),
-			scaleX: captured.pixelDensity.scaleX,
-			scaleY: captured.pixelDensity.scaleY,
-			width: captured.width,
-		};
-	} catch {
-		// Fallback: use screencapture CLI (macOS only). Density is unknown until that path reports it.
-		const tmpPath = join(tmpdir(), `computer-use-mcp-${Date.now()}.png`);
-		try {
-			execFileSync('screencapture', ['-x', tmpPath]);
-			const buffer = readFileSync(tmpPath);
-			const image = (await Jimp.read(buffer)) as unknown as ReturnType<typeof imageToJimp>;
-			return {height: image.getHeight(), image, width: image.getWidth()};
-		} finally {
-			try {
-				unlinkSync(tmpPath);
-			} catch {
-				/* ignore cleanup errors */
-			}
-		}
-	}
-}
 
 // Configure nut-js
 mouse.config.autoDelayMs = 100;
@@ -176,7 +133,7 @@ const toolDescription = `Use a mouse and keyboard to interact with a computer, a
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
 * Coordinate spaces: mouse actions with a coordinate and get_cursor_position accept coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). Desktop units can differ from captured pixels on a high-DPI display.
 * Screenshot geometry: each screenshot reports image size, desktop_region, capture size, and desktop_per_image_pixel. Convert with desktop_x = desktop_region.left + image_x * desktop_per_image_pixel.x, and the same for y. Round to a desktop point inside that rectangle and send coordinate_space: desktop. The x and y factors use the actual image size, so they can differ. The server does not remember the screenshot.
-* Screenshot resolution: screenshot.resolution accepts api (default, size-limited) or native (captured dimensions, non-palette PNG). Disable screenshot.include_crosshair for unaltered native pixels. Clients/providers may resize images after delivery; convert coordinates using the delivered image's geometry, not an assumed client-view size.
+* Screenshot resolution: screenshot.resolution accepts api (default, size-limited), native (captured dimensions), or desktop (one image pixel per desktop unit). Native and desktop use non-palette PNG. Disable screenshot.include_crosshair for unaltered native pixels. Clients/providers may resize images after delivery; convert coordinates using the delivered image's geometry, not an assumed client-view size.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
 * Efficient Workflow: Use 'sequence' to combine actions such as clicking, waiting, and taking a screenshot in a single tool call. At most one click, drag, key, or type action is allowed in a sequence. A screenshot afterward is highly recommended; another such action requires a new tool call so you can inspect the result first.
 * If you see boxes with two letters in them, typing these letters will click that element. Use this instead of other shortcuts or clicking, where possible.
@@ -202,7 +159,7 @@ const coordinateSpaceSchema = z.enum(['api', 'desktop'])
 const durationSchema = z.number().int().positive().max(60_000);
 const screenshotOptionsSchema = z.object({
 	include_crosshair: z.boolean().optional().describe('Draw the cursor crosshair (default: true).'),
-	resolution: z.enum(['api', 'native']).optional().describe('api (default) retains size limits; native preserves captured dimensions and unannotated pixels. Clients/providers may resize native images; use image geometry to convert points to desktop coordinates.'),
+	resolution: z.enum(['api', 'native', 'desktop']).optional().describe('api (default) retains size limits; native preserves captured dimensions and unannotated pixels; desktop returns one image pixel per desktop unit. Clients/providers may resize images; use image geometry to convert points to desktop coordinates.'),
 }).strict().describe('Options for get_screenshot only; set separately on each screenshot step in a sequence.');
 
 export function registerComputer(server: McpServer): void {
@@ -492,23 +449,23 @@ export function registerComputer(server: McpServer): void {
 					const cursorPos = await mouse.getPosition();
 
 					// Capture the entire screen (may be at Retina resolution)
-					const captured = await grabScreen();
-					const {image} = captured;
 					const desktopWidth = await screen.width();
 					const desktopHeight = await screen.height();
+					const captured = await grabScreen(desktopWidth, desktopHeight);
+					const {image} = captured;
 
 					const resolution = screenshot?.resolution ?? 'api';
 					const apiScaleFactor = getSizeToApiScale(image.getWidth(), image.getHeight());
-					resizeScreenshot(image, resolution, apiScaleFactor);
+					resizeScreenshot(image, resolution, {apiScaleFactor, desktopWidth, desktopHeight});
 
 					const imageWidth = image.getWidth();
 					const imageHeight = image.getHeight();
 					const includeCrosshair = screenshot?.include_crosshair ?? true;
 					if (includeCrosshair) {
 						// Convert desktop cursor coordinates to the requested image grid
-						const scale = resolution === 'native' ? desktopWidth / imageWidth : await getApiToLogicalScale();
-						const scaleY = resolution === 'native' ? desktopHeight / imageHeight : scale;
-						const cursorInImageX = Math.floor(cursorPos.x / scale);
+						const scaleX = desktopWidth / imageWidth;
+						const scaleY = desktopHeight / imageHeight;
+						const cursorInImageX = Math.floor(cursorPos.x / scaleX);
 						const cursorInImageY = Math.floor(cursorPos.y / scaleY);
 
 						drawCrosshair(image, cursorInImageX, cursorInImageY);

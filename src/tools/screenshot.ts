@@ -1,4 +1,10 @@
-import type {imageToJimp} from '@nut-tree-fork/nut-js';
+import {imageToJimp, screen} from '@nut-tree-fork/nut-js';
+import {execFileSync} from 'node:child_process';
+import {randomUUID} from 'node:crypto';
+import {readFileSync, rmSync} from 'node:fs';
+import {platform, tmpdir} from 'node:os';
+import {join} from 'node:path';
+import Jimp from 'jimp';
 import sharp from 'sharp';
 
 export function drawCrosshair(image: ReturnType<typeof imageToJimp>, x: number, y: number): void {
@@ -31,11 +37,29 @@ export async function encodeScreenshot(image: ReturnType<typeof imageToJimp>, re
 		.toBuffer();
 }
 
-export function resizeScreenshot(image: ReturnType<typeof imageToJimp>, resolution: ScreenshotResolution, apiScaleFactor: number): void {
-	if (resolution === 'api' && apiScaleFactor < 1) {
+export async function grabScreen(desktopWidth: number, desktopHeight: number): Promise<CapturedScreenshot> {
+	try {
+		const captured = await screen.grab();
+		const {height, width, pixelDensity: {scaleX, scaleY}} = captured;
+		return {
+			height, image: imageToJimp(captured), scaleX, scaleY, width,
+		};
+	} catch (error) {
+		if (platform() !== 'darwin') {
+			throw error;
+		}
+
+		return grabMainDisplayFallback(desktopWidth, desktopHeight);
+	}
+}
+
+export function resizeScreenshot(image: ReturnType<typeof imageToJimp>, resolution: ScreenshotResolution, size: {apiScaleFactor: number; desktopWidth: number; desktopHeight: number}): void {
+	if (resolution === 'desktop') {
+		image.resize(size.desktopWidth, size.desktopHeight);
+	} else if (resolution === 'api' && size.apiScaleFactor < 1) {
 		image.resize(
-			Math.floor(image.getWidth() * apiScaleFactor),
-			Math.floor(image.getHeight() * apiScaleFactor),
+			Math.floor(image.getWidth() * size.apiScaleFactor),
+			Math.floor(image.getHeight() * size.apiScaleFactor),
 		);
 	}
 }
@@ -64,6 +88,18 @@ export function screenshotMetadata(input: ScreenshotSource) {
 	};
 }
 
+function assertFallbackGeometry(width: number, height: number, desktopWidth: number, desktopHeight: number): {scaleX: number; scaleY: number} {
+	const validBounds = [width, height, desktopWidth, desktopHeight].every((size) => Number.isSafeInteger(size) && size > 0);
+	const scaleX = width / desktopWidth;
+	const scaleY = height / desktopHeight;
+	// Allow one captured pixel of rounding at fractional display densities.
+	if (!validBounds || Math.abs(scaleX - scaleY) > Math.max(1 / desktopWidth, 1 / desktopHeight)) {
+		throw new Error('Cannot establish reliable main-display capture geometry');
+	}
+
+	return {scaleX, scaleY};
+}
+
 function assertScreenshotMapping(input: ScreenshotSource): void {
 	if (input.imageWidth < 1 || input.imageHeight < 1) {
 		throw new Error('Cannot map screenshot pixels to desktop coordinates');
@@ -80,7 +116,31 @@ function assertScreenshotMapping(input: ScreenshotSource): void {
 	}
 }
 
-export type ScreenshotResolution = 'api' | 'native';
+async function grabMainDisplayFallback(desktopWidth: number, desktopHeight: number): Promise<CapturedScreenshot> {
+	const tmpPath = join(tmpdir(), `computer-use-mcp-${randomUUID()}.png`);
+	try {
+		execFileSync('screencapture', ['-x', '-m', tmpPath]);
+		const image = (await Jimp.read(readFileSync(tmpPath))) as unknown as ReturnType<typeof imageToJimp>;
+		const height = image.getHeight();
+		const width = image.getWidth();
+		const {scaleX, scaleY} = assertFallbackGeometry(width, height, desktopWidth, desktopHeight);
+		return {
+			height, image, scaleX, scaleY, width,
+		};
+	} finally {
+		rmSync(tmpPath, {force: true});
+	}
+}
+
+export type CapturedScreenshot = {
+	height: number;
+	image: ReturnType<typeof imageToJimp>;
+	scaleX: number;
+	scaleY: number;
+	width: number;
+};
+
+export type ScreenshotResolution = 'api' | 'native' | 'desktop';
 
 type ScreenshotSource = {
 	captureHeight: number;

@@ -54,7 +54,7 @@ Each image is preceded by its own metadata, including `include_crosshair`. Scree
 
 ### Screenshot resolution
 
-`screenshot.resolution` accepts `api` (default) or `native`. API mode keeps the existing size limits and PNG compression. Native mode skips resizing and uses non-palette PNG; with the crosshair disabled, captured RGBA pixel values are preserved:
+`screenshot.resolution` accepts `api` (default), `native`, or `desktop`. API mode keeps the existing size limits and PNG compression. Native mode skips resizing and uses non-palette PNG; with the crosshair disabled, captured RGBA pixel values are preserved:
 
 ```json
 {"action":"get_screenshot","screenshot":{"resolution":"native","include_crosshair":false}}
@@ -62,7 +62,23 @@ Each image is preceded by its own metadata, including `include_crosshair`. Scree
 
 Native screenshots still include the crosshair unless disabled. On high-DPI displays their dimensions can exceed desktop dimensions. Each `get_screenshot` sequence step can choose its own resolution; use each image's metadata for coordinate conversion and send the converted point with `coordinate_space: "desktop"`.
 
+Desktop mode resizes to the desktop's width and height and also uses non-palette PNG:
+
+```json
+{"action":"get_screenshot","screenshot":{"resolution":"desktop"}}
+```
+
+For full-screen desktop mode, image coordinates already match desktop coordinates; native mode instead retains all captured detail and may require density conversion. Crosshair placement uses the actual returned dimensions in every mode, including API mode's integer-rounded resizing. Legacy mouse-coordinate scaling is unchanged; use per-image geometry and explicit desktop coordinates for reliable conversion.
+
 Downstream clients or providers may resize native images. The server reports dimensions of the PNG it returns, not a client's subsequently resized view; do not assume those grids match.
+
+### Capture fallback and platform limits
+
+If the SDK capture fails on macOS, the server uses non-interactive `screencapture -m` to capture only the main display, with a unique tool-owned temporary PNG removed after success or failure. SDK failures on other platforms are returned unchanged; the macOS command is not invoked there.
+
+Fallback geometry is derived from the raw PNG and desktop dimensions. Empty/non-finite bounds or incompatible display/capture aspect ratios fail explicitly rather than returning guessed mappings. Native, desktop, and API modes share the same subsequent processing. Changing display geometry during a request can still cause a runtime failure.
+
+Automated checks use mocked SDK/platform/artifact operations and real PNG processing. They do not prove live macOS permissions, display density, or multi-display correctness; corresponding hardware validation remains unverified.
 
 ### Coordinates
 
