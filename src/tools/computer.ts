@@ -18,7 +18,7 @@ import Jimp from 'jimp';
 import sharp from 'sharp';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
-import {screenshotMetadata} from './screenshot.js';
+import {drawCrosshair, screenshotMetadata} from './screenshot.js';
 
 /**
  * Grab the screen, falling back to the macOS `screencapture` CLI if nut-js fails
@@ -187,7 +187,7 @@ Window focus:
 * On macOS, clicking on a window that is not focused (e.g. behind another application) may only bring that window to the front without triggering the actual click on the element. If your click doesn't seem to have had an effect, take a screenshot to verify and click again — the window should now be focused and the second click will register.
 
 Using the crosshair:
-* Screenshots show a red crosshair at the current cursor position.
+* Screenshots show a red crosshair at the current cursor position by default. Set screenshot.include_crosshair to false on get_screenshot to omit the marker; options are local to each sequence step.
 * After clicking, check where the crosshair appears vs your target. If it missed, adjust coordinates proportionally to the distance - start with large adjustments and refine. Avoid small incremental changes when the crosshair is far from the target (distances are often further than you expect).
 * Consider display dimensions when estimating positions. E.g. if it's 90% to the bottom of the screen, the coordinates should reflect this.`;
 
@@ -198,6 +198,9 @@ const coordinateSchema = z
 const coordinateSpaceSchema = z.enum(['api', 'desktop'])
 	.describe('Coordinate grid for mouse actions with coordinate and get_cursor_position: api (default) uses the reduced screenshot grid; desktop uses the desktop grid directly. Cursor queries return {x, y} in the requested grid. Convert screenshot points with that screenshot\'s geometry; the server does not map them from a previous screenshot.');
 const durationSchema = z.number().int().positive().max(60_000);
+const screenshotOptionsSchema = z.object({
+	include_crosshair: z.boolean().optional().describe('Draw the cursor crosshair (default: true).'),
+}).strict().describe('Options for get_screenshot only; set separately on each screenshot step in a sequence.');
 
 export function registerComputer(server: McpServer): void {
 	server.registerTool(
@@ -209,12 +212,14 @@ export function registerComputer(server: McpServer): void {
 				action: ActionEnum.describe(actionDescription),
 				coordinate: coordinateSchema.optional(),
 				coordinate_space: coordinateSpaceSchema.optional(),
+				screenshot: screenshotOptionsSchema.optional(),
 				text: z.string().optional().describe('Text to type or key command to execute'),
 				duration_ms: durationSchema.optional().describe('Milliseconds to wait (1 to 60000); required for wait'),
 				actions: z.array(z.object({
 					action: ActionEnum,
 					coordinate: coordinateSchema.optional(),
 					coordinate_space: coordinateSpaceSchema.optional(),
+					screenshot: screenshotOptionsSchema.optional(),
 					text: z.string().optional(),
 					duration_ms: durationSchema.optional(),
 				})).optional().describe('Actions to perform in order; at most one click, drag, key, or type action per sequence.'),
@@ -225,13 +230,14 @@ export function registerComputer(server: McpServer): void {
 			},
 		},
 		async function performAction(args: any): Promise<any> {
-			const {action, coordinate, coordinate_space, text, duration_ms, actions} = args as {
+			const {action, coordinate, coordinate_space, screenshot, text, duration_ms, actions} = args as {
 				action: z.infer<typeof ActionEnum>;
 				coordinate?: [number, number];
 				coordinate_space?: z.infer<typeof coordinateSpaceSchema>;
+				screenshot?: z.infer<typeof screenshotOptionsSchema>;
 				text?: string;
 				duration_ms?: number;
-				actions?: {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; coordinate_space?: z.infer<typeof coordinateSpaceSchema>; text?: string; duration_ms?: number}[];
+				actions?: {action: z.infer<typeof ActionEnum>; coordinate?: [number, number]; coordinate_space?: z.infer<typeof coordinateSpaceSchema>; screenshot?: z.infer<typeof screenshotOptionsSchema>; text?: string; duration_ms?: number}[];
 			};
 
 			// Log action for security auditing
@@ -241,6 +247,7 @@ export function registerComputer(server: McpServer): void {
 			}
 
 			validateCoordinateSpace(args);
+			validateScreenshotOptions(args);
 
 			// Preserve legacy API scaling unless desktop coordinates are explicit
 			let scaledCoordinate = coordinate;
@@ -283,6 +290,7 @@ export function registerComputer(server: McpServer): void {
 					let consequentialCount = 0;
 					for (const seqAction of actions) {
 						validateCoordinateSpace(seqAction);
+						validateScreenshotOptions(seqAction);
 						if (seqAction.action === 'sequence') {
 							throw new Error('Nested sequences are not allowed');
 						}
@@ -495,46 +503,17 @@ export function registerComputer(server: McpServer): void {
 						);
 					}
 
-					// Calculate cursor position in API image coordinates
-					// cursor is in logical coords, need to convert to API image coords
-					const scale = await getApiToLogicalScale();
-					const cursorInImageX = Math.floor(cursorPos.x / scale);
-					const cursorInImageY = Math.floor(cursorPos.y / scale);
-
-					// Draw a crosshair at cursor position (red color)
-					const crosshairSize = 20;
-					const crosshairColor = 0xFF0000FF; // Red with full opacity (RGBA)
 					const imageWidth = image.getWidth();
 					const imageHeight = image.getHeight();
+					const includeCrosshair = screenshot?.include_crosshair ?? true;
+					if (includeCrosshair) {
+						// Calculate cursor position in API image coordinates
+						// cursor is in logical coords, need to convert to API image coords
+						const scale = await getApiToLogicalScale();
+						const cursorInImageX = Math.floor(cursorPos.x / scale);
+						const cursorInImageY = Math.floor(cursorPos.y / scale);
 
-					// Draw horizontal line
-					for (let x = Math.max(0, cursorInImageX - crosshairSize); x <= Math.min(imageWidth - 1, cursorInImageX + crosshairSize); x++) {
-						if (cursorInImageY >= 0 && cursorInImageY < imageHeight) {
-							image.setPixelColor(crosshairColor, x, cursorInImageY);
-							// Make it thicker
-							if (cursorInImageY > 0) {
-								image.setPixelColor(crosshairColor, x, cursorInImageY - 1);
-							}
-
-							if (cursorInImageY < imageHeight - 1) {
-								image.setPixelColor(crosshairColor, x, cursorInImageY + 1);
-							}
-						}
-					}
-
-					// Draw vertical line
-					for (let y = Math.max(0, cursorInImageY - crosshairSize); y <= Math.min(imageHeight - 1, cursorInImageY + crosshairSize); y++) {
-						if (cursorInImageX >= 0 && cursorInImageX < imageWidth) {
-							image.setPixelColor(crosshairColor, cursorInImageX, y);
-							// Make it thicker
-							if (cursorInImageX > 0) {
-								image.setPixelColor(crosshairColor, cursorInImageX - 1, y);
-							}
-
-							if (cursorInImageX < imageWidth - 1) {
-								image.setPixelColor(crosshairColor, cursorInImageX + 1, y);
-							}
-						}
+						drawCrosshair(image, cursorInImageX, cursorInImageY);
 					}
 
 					// Get PNG buffer from Jimp
@@ -559,6 +538,7 @@ export function registerComputer(server: McpServer): void {
 									desktopWidth,
 									imageHeight,
 									imageWidth,
+									includeCrosshair,
 									scaleX: captured.scaleX,
 									scaleY: captured.scaleY,
 								})),
@@ -581,5 +561,11 @@ function validateCoordinateSpace(args: {action: string; coordinate?: number[]; c
 	const isCursorQuery = args.action === 'get_cursor_position' && !args.coordinate;
 	if (args.coordinate_space !== undefined && !isCursorQuery && (!args.coordinate || !mouseActions.includes(args.action))) {
 		throw new Error('coordinate_space is only allowed for mouse actions with coordinate or get_cursor_position without coordinate');
+	}
+}
+
+function validateScreenshotOptions(args: {action: string; screenshot?: unknown}): void {
+	if (args.screenshot !== undefined && args.action !== 'get_screenshot') {
+		throw new Error('screenshot options are only allowed for get_screenshot');
 	}
 }

@@ -143,6 +143,21 @@ describe('computer tool', () => {
 	});
 
 	describe('inputSchema', () => {
+		it.each([
+			{
+				action: 'mouse_move', coordinate: [100, 100], screenshot: {include_crosshair: false},
+			},
+			{
+				action: 'sequence', screenshot: {include_crosshair: false},
+				actions: [{action: 'mouse_move', coordinate: [100, 100]}],
+			},
+		])('rejects screenshot options on $action before moving', async (args) => {
+			const result = await callComputer(args);
+
+			expect(result.isError).toBe(true);
+			expect(mouse.setPosition).not.toHaveBeenCalled();
+		});
+
 		it('advertises coordinate.items as an object schema (array elements), not an array (tuple items)', async () => {
 			const result = await sendRequest<ListToolsResult>({
 				jsonrpc: '2.0',

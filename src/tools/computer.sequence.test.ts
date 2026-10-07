@@ -63,7 +63,7 @@ describe('computer sequences', () => {
 		await server.close();
 	});
 
-	async function callSequence(actions: {action: string; coordinate?: number[]; text?: string; duration_ms?: number}[]): Promise<CallToolResult> {
+	async function callSequence(actions: {action: string; coordinate?: number[]; text?: string; duration_ms?: number; screenshot?: Record<string, unknown>}[]): Promise<CallToolResult> {
 		return new Promise((resolve, reject) => {
 			clientTransport.onmessage = (message: JSONRPCMessage) => {
 				if ('result' in message) {
@@ -121,6 +121,9 @@ describe('computer sequences', () => {
 		{action: 'sequence'},
 		{action: 'wait', duration_ms: 1, text: 'ignored'},
 		{action: 'left_click', duration_ms: 1},
+		{action: 'mouse_move', coordinate: [100, 200], screenshot: {include_crosshair: false}},
+		{action: 'get_screenshot', screenshot: {include_crosshair: 'false'}},
+		{action: 'get_screenshot', screenshot: {unsupported: true}},
 	])('rejects invalid sequence step $action before clicking', async (step) => {
 		const result = await callSequence([{action: 'left_click'}, step]);
 
@@ -136,10 +139,21 @@ describe('computer sequences', () => {
 		expect(events).toEqual([]);
 	});
 
-	it('returns every screenshot captured within one sequence', async () => {
-		const result = await callSequence([{action: 'get_screenshot'}, {action: 'get_screenshot'}]);
+	it('keeps each step-local annotation setting paired with its image', async () => {
+		const result = await callSequence([
+			{action: 'get_screenshot', screenshot: {include_crosshair: false}},
+			{action: 'get_screenshot'},
+		]);
 
 		expect(result.isError).not.toBe(true);
-		expect(result.content.filter((item) => item.type === 'image')).toHaveLength(2);
+		expect(result.content.map((item) => item.type)).toEqual(['text', 'image', 'text', 'image']);
+		const first = result.content[0];
+		const second = result.content[2];
+		if (first?.type !== 'text' || second?.type !== 'text') {
+			throw new Error('expected screenshot metadata');
+		}
+
+		expect(JSON.parse(first.text)).toMatchObject({include_crosshair: false});
+		expect(JSON.parse(second.text)).toMatchObject({include_crosshair: true});
 	});
 });

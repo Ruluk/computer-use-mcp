@@ -102,4 +102,23 @@ describe('computer screenshots', () => {
 		});
 		await expect(sharp(Buffer.from(image.data, 'base64')).metadata()).resolves.toMatchObject({width: 1568, height: 737});
 	});
+
+	it('draws the default crosshair but leaves disabled screenshots unannotated', async () => {
+		const annotated = await callComputer({action: 'get_screenshot'});
+		const unannotated = await callComputer({action: 'get_screenshot', screenshot: {include_crosshair: false}});
+
+		expect(unannotated.isError, JSON.stringify(unannotated.content)).not.toBe(true);
+		const cleanMetadata = unannotated.content[0];
+		const defaultImage = annotated.content[1];
+		const cleanImage = unannotated.content[1];
+		if (cleanMetadata?.type !== 'text' || defaultImage?.type !== 'image' || cleanImage?.type !== 'image') {
+			throw new Error('expected screenshot metadata and images');
+		}
+
+		expect(JSON.parse(cleanMetadata.text)).toMatchObject({include_crosshair: false});
+		const defaultPixels = await sharp(Buffer.from(defaultImage.data, 'base64')).ensureAlpha().raw().toBuffer();
+		const cleanPixels = await sharp(Buffer.from(cleanImage.data, 'base64')).ensureAlpha().raw().toBuffer();
+		expect(defaultPixels.includes(Buffer.from([255, 0, 0, 255]))).toBe(true);
+		expect(cleanPixels.every((channel) => channel === 255)).toBe(true);
+	});
 });

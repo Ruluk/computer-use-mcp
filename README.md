@@ -36,6 +36,22 @@ To click, wait for the interface to update, and see the result in one request, c
 
 `wait` accepts 1–60000 milliseconds. A sequence can contain at most one click, drag, key, or type action, even if it includes screenshots: the caller cannot verify an intermediate screenshot until the request finishes. A final screenshot is optional but recommended. Multiple screenshots in one sequence are returned together.
 
+### Screenshot annotations
+
+Screenshots include a red cursor crosshair by default. To inspect content without the marker:
+
+```json
+{"action":"get_screenshot","screenshot":{"include_crosshair":false}}
+```
+
+The same options work on individual `get_screenshot` sequence steps, independently:
+
+```json
+{"action":"sequence","actions":[{"action":"get_screenshot","screenshot":{"include_crosshair":false}},{"action":"get_screenshot"}]}
+```
+
+Each image is preceded by its own metadata, including `include_crosshair`. Screenshot options are rejected on other actions or on the sequence itself before any sequence actions run. Disabling the crosshair removes only the tool's marker, not cursor pixels present in the capture. Resizing and compression remain unchanged.
+
 ### Coordinates
 
 By default, positions use `coordinate_space: "api"`: a reduced coordinate grid based on the screenshot size limits. You can omit the field to keep that behavior.

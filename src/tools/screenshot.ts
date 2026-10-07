@@ -1,3 +1,28 @@
+import type {imageToJimp} from '@nut-tree-fork/nut-js';
+
+export function drawCrosshair(image: ReturnType<typeof imageToJimp>, x: number, y: number): void {
+	const imageWidth = image.getWidth();
+	const imageHeight = image.getHeight();
+	const crosshairSize = 20;
+	const crosshairColor = 0xFF0000FF;
+
+	if (y >= 0 && y < imageHeight) {
+		for (let lineX = Math.max(0, x - crosshairSize); lineX <= Math.min(imageWidth - 1, x + crosshairSize); lineX++) {
+			for (let lineY = Math.max(0, y - 1); lineY <= Math.min(imageHeight - 1, y + 1); lineY++) {
+				image.setPixelColor(crosshairColor, lineX, lineY);
+			}
+		}
+	}
+
+	if (x >= 0 && x < imageWidth) {
+		for (let lineY = Math.max(0, y - crosshairSize); lineY <= Math.min(imageHeight - 1, y + crosshairSize); lineY++) {
+			for (let lineX = Math.max(0, x - 1); lineX <= Math.min(imageWidth - 1, x + 1); lineX++) {
+				image.setPixelColor(crosshairColor, lineX, lineY);
+			}
+		}
+	}
+}
+
 export function screenshotMetadata(input: ScreenshotSource) {
 	assertScreenshotMapping(input);
 	return {
@@ -18,7 +43,7 @@ export function screenshotMetadata(input: ScreenshotSource) {
 			x: input.desktopWidth / input.imageWidth,
 			y: input.desktopHeight / input.imageHeight,
 		},
-		include_crosshair: true,
+		include_crosshair: input.includeCrosshair,
 	};
 }
 
@@ -45,6 +70,7 @@ type ScreenshotSource = {
 	desktopWidth: number;
 	imageHeight: number;
 	imageWidth: number;
+	includeCrosshair: boolean;
 	scaleX?: number | undefined;
 	scaleY?: number | undefined;
 };
