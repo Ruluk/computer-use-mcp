@@ -1,4 +1,4 @@
-import {imageToJimp, screen} from '@nut-tree-fork/nut-js';
+import {imageToJimp, Region, screen} from '@nut-tree-fork/nut-js';
 import {execFileSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {readFileSync, rmSync} from 'node:fs';
@@ -7,26 +7,21 @@ import {join} from 'node:path';
 import Jimp from 'jimp';
 import sharp from 'sharp';
 
-export function drawCrosshair(image: ReturnType<typeof imageToJimp>, x: number, y: number): void {
-	const imageWidth = image.getWidth();
-	const imageHeight = image.getHeight();
-	const crosshairSize = 20;
-	const crosshairColor = 0xFF0000FF;
-
-	if (y >= 0 && y < imageHeight) {
-		for (let lineX = Math.max(0, x - crosshairSize); lineX <= Math.min(imageWidth - 1, x + crosshairSize); lineX++) {
-			for (let lineY = Math.max(0, y - 1); lineY <= Math.min(imageHeight - 1, y + 1); lineY++) {
-				image.setPixelColor(crosshairColor, lineX, lineY);
-			}
-		}
+export function annotateScreenshot(image: ReturnType<typeof imageToJimp>, cursor: {x: number; y: number}, region: DesktopRegion): void {
+	const x = cursor.x - region.left;
+	const y = cursor.y - region.top;
+	if (x < 0 || y < 0 || x >= region.width || y >= region.height) {
+		return;
 	}
 
-	if (x >= 0 && x < imageWidth) {
-		for (let lineY = Math.max(0, y - crosshairSize); lineY <= Math.min(imageHeight - 1, y + crosshairSize); lineY++) {
-			for (let lineX = Math.max(0, x - 1); lineX <= Math.min(imageWidth - 1, x + 1); lineX++) {
-				image.setPixelColor(crosshairColor, lineX, lineY);
-			}
-		}
+	drawCrosshair(image, Math.floor((x * image.getWidth()) / region.width), Math.floor((y * image.getHeight()) / region.height));
+}
+
+export function assertRegionBounds(region: DesktopRegion, desktopWidth: number, desktopHeight: number): void {
+	const validIntegers = [region.left, region.top, region.width, region.height, desktopWidth, desktopHeight].every(Number.isSafeInteger);
+	if (!validIntegers || region.width <= 0 || region.height <= 0 || region.left < 0 || region.top < 0
+		|| region.left + region.width > desktopWidth || region.top + region.height > desktopHeight) {
+		throw new Error(`Screenshot region is outside display bounds of ${desktopWidth}x${desktopHeight}`);
 	}
 }
 
@@ -37,9 +32,15 @@ export async function encodeScreenshot(image: ReturnType<typeof imageToJimp>, re
 		.toBuffer();
 }
 
-export async function grabScreen(desktopWidth: number, desktopHeight: number): Promise<CapturedScreenshot> {
+export async function grabScreen(desktopWidth: number, desktopHeight: number, region?: DesktopRegion): Promise<CapturedScreenshot> {
+	if (region) {
+		assertRegionBounds(region, desktopWidth, desktopHeight);
+	}
+
 	try {
-		const captured = await screen.grab();
+		const captured = region
+			? await screen.grabRegion(new Region(region.left, region.top, region.width, region.height))
+			: await screen.grab();
 		const {height, width, pixelDensity: {scaleX, scaleY}} = captured;
 		return {
 			height, image: imageToJimp(captured), scaleX, scaleY, width,
@@ -49,7 +50,8 @@ export async function grabScreen(desktopWidth: number, desktopHeight: number): P
 			throw error;
 		}
 
-		return grabMainDisplayFallback(desktopWidth, desktopHeight);
+		const captured = await grabMainDisplayFallback(desktopWidth, desktopHeight);
+		return region ? cropFallbackCapture(captured, region) : captured;
 	}
 }
 
@@ -72,17 +74,12 @@ export function screenshotMetadata(input: ScreenshotSource) {
 		resolution: input.resolution,
 		desktop_width: input.desktopWidth,
 		desktop_height: input.desktopHeight,
-		desktop_region: {
-			left: 0,
-			top: 0,
-			width: input.desktopWidth,
-			height: input.desktopHeight,
-		},
+		desktop_region: input.desktopRegion,
 		capture_width: input.captureWidth,
 		capture_height: input.captureHeight,
 		desktop_per_image_pixel: {
-			x: input.desktopWidth / input.imageWidth,
-			y: input.desktopHeight / input.imageHeight,
+			x: input.desktopRegion.width / input.imageWidth,
+			y: input.desktopRegion.height / input.imageHeight,
 		},
 		include_crosshair: input.includeCrosshair,
 	};
@@ -109,10 +106,51 @@ function assertScreenshotMapping(input: ScreenshotSource): void {
 		return;
 	}
 
-	const widthMatches = Math.round(input.desktopWidth * input.scaleX) === input.captureWidth;
-	const heightMatches = Math.round(input.desktopHeight * input.scaleY) === input.captureHeight;
+	const fullScreen = input.desktopRegion.left === 0 && input.desktopRegion.top === 0
+		&& input.desktopRegion.width === input.desktopWidth && input.desktopRegion.height === input.desktopHeight;
+	const roundingTolerance = fullScreen ? 0 : 1;
+	const widthMatches = Math.abs(Math.round(input.desktopRegion.width * input.scaleX) - input.captureWidth) <= roundingTolerance;
+	const heightMatches = Math.abs(Math.round(input.desktopRegion.height * input.scaleY) - input.captureHeight) <= roundingTolerance;
 	if (!widthMatches || !heightMatches) {
 		throw new Error(`Cannot map screenshot pixels to desktop coordinates: capture ${input.captureWidth}x${input.captureHeight}, desktop ${input.desktopWidth}x${input.desktopHeight}, density ${input.scaleX}x${input.scaleY}`);
+	}
+}
+
+function cropFallbackCapture(captured: CapturedScreenshot, region: DesktopRegion): CapturedScreenshot {
+	const left = Math.round(region.left * captured.scaleX);
+	const top = Math.round(region.top * captured.scaleY);
+	const right = Math.round((region.left + region.width) * captured.scaleX);
+	const bottom = Math.round((region.top + region.height) * captured.scaleY);
+	const width = right - left;
+	const height = bottom - top;
+	if (width < 1 || height < 1 || right > captured.width || bottom > captured.height) {
+		throw new Error('Cannot map screenshot rectangle to raw fallback pixels');
+	}
+
+	captured.image.crop(left, top, width, height);
+	return {...captured, height, width};
+}
+
+function drawCrosshair(image: ReturnType<typeof imageToJimp>, x: number, y: number): void {
+	const imageWidth = image.getWidth();
+	const imageHeight = image.getHeight();
+	const crosshairSize = 20;
+	const crosshairColor = 0xFF0000FF;
+
+	if (y >= 0 && y < imageHeight) {
+		for (let lineX = Math.max(0, x - crosshairSize); lineX <= Math.min(imageWidth - 1, x + crosshairSize); lineX++) {
+			for (let lineY = Math.max(0, y - 1); lineY <= Math.min(imageHeight - 1, y + 1); lineY++) {
+				image.setPixelColor(crosshairColor, lineX, lineY);
+			}
+		}
+	}
+
+	if (x >= 0 && x < imageWidth) {
+		for (let lineY = Math.max(0, y - crosshairSize); lineY <= Math.min(imageHeight - 1, y + crosshairSize); lineY++) {
+			for (let lineX = Math.max(0, x - 1); lineX <= Math.min(imageWidth - 1, x + 1); lineX++) {
+				image.setPixelColor(crosshairColor, lineX, lineY);
+			}
+		}
 	}
 }
 
@@ -140,12 +178,20 @@ export type CapturedScreenshot = {
 	width: number;
 };
 
+export type DesktopRegion = {
+	left: number;
+	top: number;
+	width: number;
+	height: number;
+};
+
 export type ScreenshotResolution = 'api' | 'native' | 'desktop';
 
 type ScreenshotSource = {
 	captureHeight: number;
 	captureWidth: number;
 	desktopHeight: number;
+	desktopRegion: DesktopRegion;
 	desktopWidth: number;
 	imageHeight: number;
 	imageWidth: number;

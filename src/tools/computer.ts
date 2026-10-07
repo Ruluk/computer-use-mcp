@@ -13,7 +13,7 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
 import {
-	drawCrosshair, encodeScreenshot, grabScreen, resizeScreenshot, screenshotMetadata,
+	annotateScreenshot, assertRegionBounds, encodeScreenshot, grabScreen, resizeScreenshot, screenshotMetadata,
 } from './screenshot.js';
 
 // Configure nut-js
@@ -159,6 +159,12 @@ const coordinateSpaceSchema = z.enum(['api', 'desktop'])
 const durationSchema = z.number().int().positive().max(60_000);
 const screenshotOptionsSchema = z.object({
 	include_crosshair: z.boolean().optional().describe('Draw the cursor crosshair (default: true).'),
+	region: z.object({
+		left: z.number().int(),
+		top: z.number().int(),
+		width: z.number().int().positive(),
+		height: z.number().int().positive(),
+	}).strict().optional().describe('Rectangle in integer desktop coordinates, fully inside the main display; selected before resizing.'),
 	resolution: z.enum(['api', 'native', 'desktop']).optional().describe('api (default) retains size limits; native preserves captured dimensions and unannotated pixels; desktop returns one image pixel per desktop unit. Clients/providers may resize images; use image geometry to convert points to desktop coordinates.'),
 }).strict().describe('Options for get_screenshot only; set separately on each screenshot step in a sequence.');
 
@@ -207,7 +213,10 @@ export function registerComputer(server: McpServer): void {
 			}
 
 			validateCoordinateSpace(args);
-			validateScreenshotOptions(args);
+			const displayBounds = screenshot?.region || actions?.some((step) => step.screenshot?.region)
+				? {width: await screen.width(), height: await screen.height()}
+				: undefined;
+			validateScreenshotOptions(args, displayBounds);
 
 			// Preserve legacy API scaling unless desktop coordinates are explicit
 			let scaledCoordinate = coordinate;
@@ -250,7 +259,7 @@ export function registerComputer(server: McpServer): void {
 					let consequentialCount = 0;
 					for (const seqAction of actions) {
 						validateCoordinateSpace(seqAction);
-						validateScreenshotOptions(seqAction);
+						validateScreenshotOptions(seqAction, displayBounds);
 						if (seqAction.action === 'sequence') {
 							throw new Error('Nested sequences are not allowed');
 						}
@@ -448,27 +457,26 @@ export function registerComputer(server: McpServer): void {
 					// Get cursor position in logical coordinates
 					const cursorPos = await mouse.getPosition();
 
-					// Capture the entire screen (may be at Retina resolution)
+					// Capture the selected rectangle (may be at high-DPI resolution)
 					const desktopWidth = await screen.width();
 					const desktopHeight = await screen.height();
-					const captured = await grabScreen(desktopWidth, desktopHeight);
+					const desktopRegion = screenshot?.region ?? {
+						left: 0, top: 0, width: desktopWidth, height: desktopHeight,
+					};
+					const captured = await grabScreen(desktopWidth, desktopHeight, screenshot?.region);
 					const {image} = captured;
 
 					const resolution = screenshot?.resolution ?? 'api';
 					const apiScaleFactor = getSizeToApiScale(image.getWidth(), image.getHeight());
-					resizeScreenshot(image, resolution, {apiScaleFactor, desktopWidth, desktopHeight});
+					resizeScreenshot(image, resolution, {
+						apiScaleFactor, desktopWidth: desktopRegion.width, desktopHeight: desktopRegion.height,
+					});
 
 					const imageWidth = image.getWidth();
 					const imageHeight = image.getHeight();
 					const includeCrosshair = screenshot?.include_crosshair ?? true;
 					if (includeCrosshair) {
-						// Convert desktop cursor coordinates to the requested image grid
-						const scaleX = desktopWidth / imageWidth;
-						const scaleY = desktopHeight / imageHeight;
-						const cursorInImageX = Math.floor(cursorPos.x / scaleX);
-						const cursorInImageY = Math.floor(cursorPos.y / scaleY);
-
-						drawCrosshair(image, cursorInImageX, cursorInImageY);
+						annotateScreenshot(image, cursorPos, desktopRegion);
 					}
 
 					const optimizedBuffer = await encodeScreenshot(image, resolution);
@@ -484,6 +492,7 @@ export function registerComputer(server: McpServer): void {
 									captureHeight: captured.height,
 									captureWidth: captured.width,
 									desktopHeight,
+									desktopRegion,
 									desktopWidth,
 									imageHeight,
 									imageWidth,
@@ -514,8 +523,12 @@ function validateCoordinateSpace(args: {action: string; coordinate?: number[]; c
 	}
 }
 
-function validateScreenshotOptions(args: {action: string; screenshot?: unknown}): void {
+function validateScreenshotOptions(args: {action: string; screenshot?: z.infer<typeof screenshotOptionsSchema>}, displayBounds?: {width: number; height: number}): void {
 	if (args.screenshot !== undefined && args.action !== 'get_screenshot') {
 		throw new Error('screenshot options are only allowed for get_screenshot');
+	}
+
+	if (args.screenshot?.region && displayBounds) {
+		assertRegionBounds(args.screenshot.region, displayBounds.width, displayBounds.height);
 	}
 }

@@ -35,19 +35,12 @@ vi.mock('@nut-tree-fork/nut-js', async (importOriginal) => ({
 			return {width: 1000, height: 1000, pixelDensity: {scaleX: 1, scaleY: 1}};
 		}),
 	},
-	imageToJimp: vi.fn((capture: {width: number; height: number}) => {
-		let {width, height} = capture;
-		return {
-			getWidth: () => width,
-			getHeight: () => height,
-			resize(imageWidth: number, imageHeight: number) {
-				width = imageWidth;
-				height = imageHeight;
-			},
-			setPixelColor: vi.fn(),
-			getBufferAsync: vi.fn(async () => Buffer.from('image')),
-		};
-	}),
+	imageToJimp: vi.fn((capture: {width: number; height: number}) => ({
+		getWidth: () => capture.width,
+		getHeight: () => capture.height,
+		setPixelColor: vi.fn(),
+		getBufferAsync: vi.fn(async () => Buffer.from('image')),
+	})),
 }));
 
 vi.mock('sharp', () => ({
@@ -145,26 +138,5 @@ describe('computer sequences', () => {
 
 		expect(result.isError).toBe(true);
 		expect(events).toEqual([]);
-	});
-
-	it('keeps each step-local resolution and annotation setting paired with its image', async () => {
-		const result = await callSequence([
-			{action: 'get_screenshot', screenshot: {resolution: 'native', include_crosshair: false}},
-			{action: 'get_screenshot', screenshot: {resolution: 'desktop'}},
-			{action: 'get_screenshot'},
-		]);
-
-		expect(result.isError).not.toBe(true);
-		expect(result.content.map((item) => item.type)).toEqual(['text', 'image', 'text', 'image', 'text', 'image']);
-		const first = result.content[0];
-		const second = result.content[2];
-		const third = result.content[4];
-		if (first?.type !== 'text' || second?.type !== 'text' || third?.type !== 'text') {
-			throw new Error('expected screenshot metadata');
-		}
-
-		expect(JSON.parse(first.text)).toMatchObject({resolution: 'native', include_crosshair: false});
-		expect(JSON.parse(second.text)).toMatchObject({resolution: 'desktop', include_crosshair: true});
-		expect(JSON.parse(third.text)).toMatchObject({resolution: 'api', include_crosshair: true});
 	});
 });

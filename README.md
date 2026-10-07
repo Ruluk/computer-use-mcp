@@ -78,7 +78,21 @@ If the SDK capture fails on macOS, the server uses non-interactive `screencaptur
 
 Fallback geometry is derived from the raw PNG and desktop dimensions. Empty/non-finite bounds or incompatible display/capture aspect ratios fail explicitly rather than returning guessed mappings. Native, desktop, and API modes share the same subsequent processing. Changing display geometry during a request can still cause a runtime failure.
 
-Automated checks use mocked SDK/platform/artifact operations and real PNG processing. They do not prove live macOS permissions, display density, or multi-display correctness; corresponding hardware validation remains unverified.
+Automated checks use mocked SDK/platform/artifact operations and real PNG processing. A live Windows 1× Firefox checkpoint also verified native crop-to-desktop-click conversion through MCP. Live macOS permissions, high-DPI, and multi-display behavior remain unverified.
+
+### Rectangle screenshots
+
+`screenshot.region` selects a main-display rectangle in integer desktop coordinates before resizing. Width and height must be positive, and the rectangle must fit the display. Invalid rectangles are rejected before any sequence actions run; bounds are rechecked when capture executes. Later display changes can cause runtime failures that cannot undo earlier sequence actions.
+
+```json
+{"action":"get_screenshot","screenshot":{"region":{"left":100,"top":70,"width":80,"height":60},"resolution":"native","include_crosshair":false}}
+```
+
+This uses SDK region capture without moving the cursor. Each image reports its selected `desktop_region`, observed capture dimensions, and actual per-axis factors. Add the rectangle origin when converting image points: a 2× native crop point `(40,20)` in this example maps to desktop point `(120,80)`. Round and constrain the result, then send `coordinate_space: "desktop"`.
+
+On macOS SDK failure, rectangle capture crops verified raw main-display fallback pixels before resolution processing. Fractional-density boundaries are rounded to raw pixel edges; metadata uses the requested desktop rectangle and actual integer crop/output dimensions. Unreliable or empty raw selections fail rather than substitute a full-screen image. Owned fallback artifacts are already removed before crop processing.
+
+Crosshairs are positioned relative to the selected rectangle using actual output dimensions, and omitted entirely when the cursor is outside it. `include_crosshair` reports the requested annotation setting even when an outside cursor leaves no visible marker. Set it to `false` for unannotated pixels.
 
 ### Coordinates
 
