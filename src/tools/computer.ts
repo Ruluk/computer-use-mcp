@@ -13,7 +13,7 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
 import {
-	annotateScreenshot, assertRegionBounds, encodeScreenshot, grabScreen, resizeScreenshot, screenshotMetadata,
+	annotateScreenshot, assertRegionBounds, encodeScreenshot, grabScreen, resizeScreenshot, resolveScreenshotRegion, screenshotMetadata,
 } from './screenshot.js';
 
 // Configure nut-js
@@ -159,6 +159,7 @@ const coordinateSpaceSchema = z.enum(['api', 'desktop'])
 const durationSchema = z.number().int().positive().max(60_000);
 const screenshotOptionsSchema = z.object({
 	include_crosshair: z.boolean().optional().describe('Draw the cursor crosshair (default: true).'),
+	target: z.enum(['screen', 'active_window']).optional().describe('screen (default) or the foreground window\'s visible main-display rectangle; never focuses or moves a window. Cannot combine active_window with region.'),
 	region: z.object({
 		left: z.number().int(),
 		top: z.number().int(),
@@ -460,10 +461,9 @@ export function registerComputer(server: McpServer): void {
 					// Capture the selected rectangle (may be at high-DPI resolution)
 					const desktopWidth = await screen.width();
 					const desktopHeight = await screen.height();
-					const desktopRegion = screenshot?.region ?? {
-						left: 0, top: 0, width: desktopWidth, height: desktopHeight,
-					};
-					const captured = await grabScreen(desktopWidth, desktopHeight, screenshot?.region);
+					const target = screenshot?.target ?? 'screen';
+					const desktopRegion = await resolveScreenshotRegion(desktopWidth, desktopHeight, target, screenshot?.region);
+					const captured = await grabScreen(desktopWidth, desktopHeight, target === 'active_window' ? desktopRegion : screenshot?.region);
 					const {image} = captured;
 
 					const resolution = screenshot?.resolution ?? 'api';
@@ -500,6 +500,7 @@ export function registerComputer(server: McpServer): void {
 									resolution,
 									scaleX: captured.scaleX,
 									scaleY: captured.scaleY,
+									target,
 								})),
 							},
 							{
@@ -526,6 +527,10 @@ function validateCoordinateSpace(args: {action: string; coordinate?: number[]; c
 function validateScreenshotOptions(args: {action: string; screenshot?: z.infer<typeof screenshotOptionsSchema>}, displayBounds?: {width: number; height: number}): void {
 	if (args.screenshot !== undefined && args.action !== 'get_screenshot') {
 		throw new Error('screenshot options are only allowed for get_screenshot');
+	}
+
+	if (args.screenshot?.target === 'active_window' && args.screenshot.region !== undefined) {
+		throw new Error('region cannot be combined with target active_window');
 	}
 
 	if (args.screenshot?.region && displayBounds) {

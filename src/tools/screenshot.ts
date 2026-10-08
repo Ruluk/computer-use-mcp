@@ -1,4 +1,6 @@
-import {imageToJimp, Region, screen} from '@nut-tree-fork/nut-js';
+import {
+	getActiveWindow, imageToJimp, Region, screen,
+} from '@nut-tree-fork/nut-js';
 import {execFileSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
 import {readFileSync, rmSync} from 'node:fs';
@@ -66,12 +68,27 @@ export function resizeScreenshot(image: ReturnType<typeof imageToJimp>, resoluti
 	}
 }
 
+export async function resolveScreenshotRegion(desktopWidth: number, desktopHeight: number, target: ScreenshotTarget, region?: DesktopRegion): Promise<DesktopRegion> {
+	if (target === 'active_window') {
+		const window = await getActiveWindow();
+		const {left, top, width, height} = await window.getRegion();
+		return {
+			left, top, width, height,
+		};
+	}
+
+	return region ?? {
+		left: 0, top: 0, width: desktopWidth, height: desktopHeight,
+	};
+}
+
 export function screenshotMetadata(input: ScreenshotSource) {
 	assertScreenshotMapping(input);
 	return {
 		image_width: input.imageWidth,
 		image_height: input.imageHeight,
 		resolution: input.resolution,
+		target: input.target,
 		desktop_width: input.desktopWidth,
 		desktop_height: input.desktopHeight,
 		desktop_region: input.desktopRegion,
@@ -187,6 +204,8 @@ export type DesktopRegion = {
 
 export type ScreenshotResolution = 'api' | 'native' | 'desktop';
 
+export type ScreenshotTarget = 'screen' | 'active_window';
+
 type ScreenshotSource = {
 	captureHeight: number;
 	captureWidth: number;
@@ -199,4 +218,5 @@ type ScreenshotSource = {
 	resolution: ScreenshotResolution;
 	scaleX?: number | undefined;
 	scaleY?: number | undefined;
+	target: ScreenshotTarget;
 };

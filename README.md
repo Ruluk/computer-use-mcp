@@ -78,7 +78,7 @@ If the SDK capture fails on macOS, the server uses non-interactive `screencaptur
 
 Fallback geometry is derived from the raw PNG and desktop dimensions. Empty/non-finite bounds or incompatible display/capture aspect ratios fail explicitly rather than returning guessed mappings. Native, desktop, and API modes share the same subsequent processing. Changing display geometry during a request can still cause a runtime failure.
 
-Automated checks use mocked SDK/platform/artifact operations and real PNG processing. A live Windows 1× Firefox checkpoint also verified native crop-to-desktop-click conversion through MCP. Live macOS permissions, high-DPI, and multi-display behavior remain unverified.
+Automated checks use mocked SDK/platform/artifact operations and real PNG processing. Live Windows 1× Firefox checkpoints also verified native crop-to-desktop-click conversion and foreground-window capture through MCP, with unchanged window focus and bounds. Live macOS permissions, high-DPI, and multi-display behavior remain unverified.
 
 ### Rectangle screenshots
 
@@ -93,6 +93,16 @@ This uses SDK region capture without moving the cursor. Each image reports its s
 On macOS SDK failure, rectangle capture crops verified raw main-display fallback pixels before resolution processing. Fractional-density boundaries are rounded to raw pixel edges; metadata uses the requested desktop rectangle and actual integer crop/output dimensions. Unreliable or empty raw selections fail rather than substitute a full-screen image. Owned fallback artifacts are already removed before crop processing.
 
 Crosshairs are positioned relative to the selected rectangle using actual output dimensions, and omitted entirely when the cursor is outside it. `include_crosshair` reports the requested annotation setting even when an outside cursor leaves no visible marker. Set it to `false` for unannotated pixels.
+
+### Foreground-window screenshots
+
+`screenshot.target` accepts `screen` (default) or `active_window`. Foreground-window targeting resolves current bounds when capture executes and reuses rectangle capture; it never focuses, moves, or resizes the window:
+
+```json
+{"action":"get_screenshot","screenshot":{"target":"active_window","resolution":"native","include_crosshair":false}}
+```
+
+The installed SDK clips window bounds to the main display, and the capture pipeline revalidates them. This captures visible screen content in that rectangle, not hidden or occluded window pixels. Unavailable or empty targets fail without full-screen substitution. An explicit `region` cannot be combined with `active_window`; conflicts are rejected before sequence side effects. Options remain local to each screenshot step, and metadata reports the selected `target` and effective rectangle.
 
 ### Coordinates
 

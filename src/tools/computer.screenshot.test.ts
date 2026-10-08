@@ -5,7 +5,7 @@ import type {CallToolResult, JSONRPCMessage, JSONRPCRequest} from '@modelcontext
 import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
 import type * as nutJs from '@nut-tree-fork/nut-js';
 import {
-	ColorMode, Image, imageToJimp, mouse, Point, screen,
+	ColorMode, getActiveWindow, Image, imageToJimp, mouse, Point, Region, screen,
 } from '@nut-tree-fork/nut-js';
 import sharp from 'sharp';
 import {execFileSync} from 'node:child_process';
@@ -16,6 +16,13 @@ import {platform} from 'node:os';
 import type * as operatingSystem from 'node:os';
 import {createServer} from '../index.js';
 import type {McpServer} from '@modelcontextprotocol/sdk/server/mcp.js';
+
+const windowProvider = vi.hoisted(() => ({
+	getWindowRegion: vi.fn(),
+	focusWindow: vi.fn(),
+	moveWindow: vi.fn(),
+	resizeWindow: vi.fn(),
+}));
 
 vi.mock('@nut-tree-fork/nut-js', async (importOriginal) => {
 	const actual = await importOriginal<typeof nutJs>();
@@ -32,6 +39,10 @@ vi.mock('@nut-tree-fork/nut-js', async (importOriginal) => {
 	);
 	return {
 		...actual,
+		getActiveWindow: vi.fn(async () => new actual.Window({
+			getScreen: () => ({screenSize: async () => ({width: 850, height: 400})}),
+			getWindow: () => windowProvider,
+		} as unknown as ConstructorParameters<typeof actual.Window>[0], 42)),
 		mouse: {
 			config: {},
 			getPosition: vi.fn(async () => ({x: 10, y: 20})),
@@ -74,6 +85,7 @@ describe('computer screenshots', () => {
 		vi.mocked(platform).mockReturnValue('win32');
 		vi.mocked(screen.width).mockResolvedValue(850);
 		vi.mocked(screen.height).mockResolvedValue(400);
+		windowProvider.getWindowRegion.mockReset().mockResolvedValue(new Region(100, 70, 80, 60));
 		server = createServer();
 		const [serverTransport, client] = InMemoryTransport.createLinkedPair();
 		clientTransport = client;
@@ -125,6 +137,7 @@ describe('computer screenshots', () => {
 			image_width: 1568,
 			image_height: 737,
 			resolution: 'api',
+			target: 'screen',
 			desktop_width: 850,
 			desktop_height: 400,
 			desktop_region: {
@@ -600,6 +613,115 @@ describe('computer screenshots', () => {
 		})]);
 		expect(mouse.setPosition).toHaveBeenCalledTimes(1);
 		expect(screen.grabRegion).not.toHaveBeenCalled();
+	});
+
+	it('captures the foreground-window target through MCP', async () => {
+		const result = await callComputer({
+			action: 'get_screenshot', screenshot: {target: 'active_window', resolution: 'native', include_crosshair: false},
+		});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		const text = result.content[0];
+		const image = result.content[1];
+		if (text?.type !== 'text' || image?.type !== 'image') {
+			throw new Error('expected screenshot metadata and image');
+		}
+
+		expect(JSON.parse(text.text)).toMatchObject({
+			target: 'active_window', desktop_region: {
+				left: 100, top: 70, width: 80, height: 60,
+			},
+		});
+		await expect(sharp(Buffer.from(image.data, 'base64')).metadata()).resolves.toMatchObject({width: 160, height: 120});
+	});
+
+	it('resolves the current foreground window at capture time without focus or movement', async () => {
+		vi.mocked(mouse.setPosition).mockImplementationOnce(async () => {
+			windowProvider.getWindowRegion.mockResolvedValue(new Region(200, 100, 60, 30));
+		});
+		const result = await callComputer({
+			action: 'sequence', actions: [
+				{action: 'mouse_move', coordinate: [20, 30], coordinate_space: 'desktop'},
+				{action: 'get_screenshot', screenshot: {target: 'active_window', resolution: 'native', include_crosshair: false}},
+			],
+		});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		const text = result.content[0];
+		if (text?.type !== 'text') {
+			throw new Error('expected screenshot metadata');
+		}
+
+		expect(JSON.parse(text.text)).toMatchObject({
+			target: 'active_window', desktop_region: {
+				left: 200, top: 100, width: 60, height: 30,
+			},
+		});
+		expect(vi.mocked(getActiveWindow).mock.invocationCallOrder[0]).toBeGreaterThan(vi.mocked(mouse.setPosition).mock.invocationCallOrder[0]!);
+		expect(windowProvider.focusWindow).not.toHaveBeenCalled();
+		expect(windowProvider.moveWindow).not.toHaveBeenCalled();
+		expect(windowProvider.resizeWindow).not.toHaveBeenCalled();
+	});
+
+	it('rejects explicit regions with active-window targets before sequence side effects', async () => {
+		const result = await callComputer({
+			action: 'sequence', actions: [
+				{action: 'mouse_move', coordinate: [20, 30], coordinate_space: 'desktop'},
+				{
+					action: 'get_screenshot', screenshot: {
+						target: 'active_window', region: {
+							left: 100, top: 70, width: 80, height: 60,
+						},
+					},
+				},
+			],
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([expect.objectContaining({
+			type: 'text', text: expect.stringMatching(/region.*active_window|active_window.*region/i),
+		})]);
+		expect(mouse.setPosition).not.toHaveBeenCalled();
+		expect(getActiveWindow).not.toHaveBeenCalled();
+	});
+
+	it('captures the active window intersection with the main display through MCP', async () => {
+		windowProvider.getWindowRegion.mockResolvedValue(new Region(-40, -10, 150, 100));
+		const result = await callComputer({
+			action: 'get_screenshot', screenshot: {target: 'active_window', resolution: 'native', include_crosshair: false},
+		});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		const text = result.content[0];
+		const image = result.content[1];
+		if (text?.type !== 'text' || image?.type !== 'image') {
+			throw new Error('expected screenshot metadata and image');
+		}
+
+		expect(JSON.parse(text.text)).toMatchObject({
+			desktop_region: {
+				left: 0, top: 0, width: 110, height: 90,
+			},
+		});
+		await expect(sharp(Buffer.from(image.data, 'base64')).metadata()).resolves.toMatchObject({width: 220, height: 180});
+	});
+
+	it.each(['unavailable', 'empty'] as const)('rejects %s active-window targets without full-screen substitution', async (state) => {
+		if (state === 'unavailable') {
+			vi.mocked(getActiveWindow).mockRejectedValueOnce(new Error('active window unavailable'));
+		} else {
+			windowProvider.getWindowRegion.mockResolvedValue(new Region(900, 450, 80, 60));
+		}
+
+		const result = await callComputer({action: 'get_screenshot', screenshot: {target: 'active_window'}});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([expect.objectContaining({
+			type: 'text', text: expect.stringMatching(/active window unavailable|display bounds/i),
+		})]);
+		expect(screen.grab).not.toHaveBeenCalled();
+		expect(screen.grabRegion).not.toHaveBeenCalled();
+		expect(execFileSync).not.toHaveBeenCalled();
 	});
 });
 
