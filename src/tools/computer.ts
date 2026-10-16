@@ -13,7 +13,7 @@ import {setTimeout as sleep} from 'node:timers/promises';
 import {toKeys} from '../utils/xdotoolStringToKeys.js';
 import {jsonResult} from '../utils/response.js';
 import {
-	annotateScreenshot, assertRegionBounds, encodeScreenshot, grabScreen, resizeScreenshot, resolveScreenshotRegion, screenshotMetadata,
+	annotateScreenshot, assertRegionBounds, encodeScreenshot, grabScreen, resizeScreenshot, resolveScreenshotRegion, samplePixelColor, screenshotMetadata,
 } from './screenshot.js';
 
 // Configure nut-js
@@ -109,6 +109,7 @@ const ActionEnum = z.enum([
 	'scroll',
 	'get_screenshot',
 	'get_cursor_position',
+	'get_pixel_color',
 	'wait',
 	'sequence',
 ]);
@@ -117,6 +118,7 @@ const actionDescription = `The action to perform. The available actions are:
 * key: Press a key or key-combination on the keyboard.
 * type: Type a string of text on the keyboard.
 * get_cursor_position: Get the current cursor position as {x, y} in coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). This does not move the cursor.
+* get_pixel_color: Sample raw desktop RGBA at coordinate using coordinate_space: api (default) or desktop. Returns {x, y, coordinate_space, rgba} with the actual sampled point rounded back into the requested grid, without an image, annotation, resizing, or palette encoding.
 * mouse_move: Move the cursor to a specified (x, y) pixel coordinate on the screen.
 * left_click: Click the left mouse button. If coordinate is provided, moves to that position first.
 * left_click_drag: Click and drag the cursor to a specified (x, y) pixel coordinate on the screen.
@@ -129,9 +131,9 @@ const actionDescription = `The action to perform. The available actions are:
 * sequence: Perform actions in order in a single tool call. Use the "actions" field to provide the array. At most one click, drag, key, or type action is allowed per sequence, since intermediate screenshots cannot be verified before the call ends. A screenshot afterward is recommended, but optional. All screenshots in a sequence are returned; otherwise the result is the last action's result.
 `;
 
-const toolDescription = `Use a mouse and keyboard to interact with a computer, and take screenshots.
+const toolDescription = `Use a mouse and keyboard to interact with a computer, take screenshots, and sample raw pixel colors.
 * This is an interface to a desktop GUI. You do not have access to a terminal or applications menu. You must click on desktop icons to start applications.
-* Coordinate spaces: mouse actions with a coordinate and get_cursor_position accept coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). Desktop units can differ from captured pixels on a high-DPI display.
+* Coordinate spaces: mouse actions with a coordinate, get_cursor_position, and get_pixel_color accept coordinate_space: api (default, reduced screenshot grid) or desktop (desktop grid). Desktop units can differ from captured pixels on a high-DPI display. Queries report the sampled point rounded into the requested grid.
 * Screenshot geometry: each screenshot reports image size, desktop_region, capture size, and desktop_per_image_pixel. Convert with desktop_x = desktop_region.left + image_x * desktop_per_image_pixel.x, and the same for y. Round to a desktop point inside that rectangle and send coordinate_space: desktop. The x and y factors use the actual image size, so they can differ. The server does not remember the screenshot.
 * Screenshot resolution: screenshot.resolution accepts api (default, size-limited), native (captured dimensions), or desktop (one image pixel per desktop unit). Native and desktop use non-palette PNG. Disable screenshot.include_crosshair for unaltered native pixels. Clients/providers may resize images after delivery; convert coordinates using the delivered image's geometry, not an assumed client-view size.
 * Always prefer using keyboard shortcuts rather than clicking, where possible.
@@ -155,7 +157,7 @@ const coordinateSchema = z
 	.length(2)
 	.describe('(x, y): Position from the left/top edge in coordinate_space (default: api). Desktop points are rounded and checked against display bounds.');
 const coordinateSpaceSchema = z.enum(['api', 'desktop'])
-	.describe('Coordinate grid for mouse actions with coordinate and get_cursor_position: api (default) uses the reduced screenshot grid; desktop uses the desktop grid directly. Cursor queries return {x, y} in the requested grid. Convert screenshot points with that screenshot\'s geometry; the server does not map them from a previous screenshot.');
+	.describe('Coordinate grid for mouse actions with coordinate, get_cursor_position, and get_pixel_color: api (default) uses the reduced screenshot grid; desktop uses the desktop grid directly. Queries report the sampled point in the requested grid. Convert screenshot points with that screenshot\'s geometry; the server does not map them from a previous screenshot.');
 const durationSchema = z.number().int().positive().max(60_000);
 const screenshotOptionsSchema = z.object({
 	include_crosshair: z.boolean().optional().describe('Draw the cursor crosshair (default: true).'),
@@ -221,8 +223,10 @@ export function registerComputer(server: McpServer): void {
 
 			// Preserve legacy API scaling unless desktop coordinates are explicit
 			let scaledCoordinate = coordinate;
+			let coordinateScale = 1;
 			if (coordinate) {
 				const scale = coordinate_space === 'desktop' ? 1 : await getApiToLogicalScale();
+				coordinateScale = scale;
 				scaledCoordinate = [
 					Math.round(coordinate[0] * scale),
 					Math.round(coordinate[1] * scale),
@@ -454,6 +458,19 @@ export function registerComputer(server: McpServer): void {
 					return jsonResult({ok: true});
 				}
 
+				case 'get_pixel_color': {
+					if (!scaledCoordinate) {
+						throw new Error('coordinate required for get_pixel_color');
+					}
+
+					const [x, y] = scaledCoordinate;
+					const rgba = await samplePixelColor(x, y);
+					return jsonResult({
+						x: Math.round(x / coordinateScale), y: Math.round(y / coordinateScale),
+						coordinate_space: coordinate_space ?? 'api', rgba,
+					});
+				}
+
 				case 'get_screenshot': {
 					// Get cursor position in logical coordinates
 					const cursorPos = await mouse.getPosition();
@@ -518,9 +535,14 @@ export function registerComputer(server: McpServer): void {
 
 function validateCoordinateSpace(args: {action: string; coordinate?: number[]; coordinate_space?: string}): void {
 	const mouseActions = ['double_click', 'left_click', 'left_click_drag', 'middle_click', 'mouse_move', 'right_click', 'scroll'];
+	if (args.action === 'get_pixel_color' && !args.coordinate) {
+		throw new Error('coordinate required for get_pixel_color');
+	}
+
 	const isCursorQuery = args.action === 'get_cursor_position' && !args.coordinate;
-	if (args.coordinate_space !== undefined && !isCursorQuery && (!args.coordinate || !mouseActions.includes(args.action))) {
-		throw new Error('coordinate_space is only allowed for mouse actions with coordinate or get_cursor_position without coordinate');
+	const isPixelQuery = args.action === 'get_pixel_color' && args.coordinate;
+	if (args.coordinate_space !== undefined && !isCursorQuery && !isPixelQuery && (!args.coordinate || !mouseActions.includes(args.action))) {
+		throw new Error('coordinate_space is only allowed for mouse actions with coordinate, get_pixel_color, or get_cursor_position without coordinate');
 	}
 }
 

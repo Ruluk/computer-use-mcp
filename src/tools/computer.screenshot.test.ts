@@ -5,7 +5,7 @@ import type {CallToolResult, JSONRPCMessage, JSONRPCRequest} from '@modelcontext
 import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
 import type * as nutJs from '@nut-tree-fork/nut-js';
 import {
-	ColorMode, getActiveWindow, Image, imageToJimp, mouse, Point, Region, screen,
+	ColorMode, getActiveWindow, Image, imageToJimp, mouse, Point, Region, RGBA, screen,
 } from '@nut-tree-fork/nut-js';
 import sharp from 'sharp';
 import {execFileSync} from 'node:child_process';
@@ -45,12 +45,14 @@ vi.mock('@nut-tree-fork/nut-js', async (importOriginal) => {
 		} as unknown as ConstructorParameters<typeof actual.Window>[0], 42)),
 		mouse: {
 			config: {},
+			leftClick: vi.fn().mockResolvedValue(undefined),
 			getPosition: vi.fn(async () => ({x: 10, y: 20})),
 			setPosition: vi.fn().mockResolvedValue(undefined),
 		},
 		screen: {
 			width: vi.fn(async () => 850),
 			height: vi.fn(async () => 400),
+			colorAt: vi.fn(async () => new actual.RGBA(18, 171, 52, 255)),
 			grab: vi.fn(async () => capture),
 			grabRegion: vi.fn(async (region: nutJs.Region) => new actual.Image(region.width * 2, region.height * 2, Buffer.alloc(region.width * region.height * 16, 255), 4, 'high-dpi-region', 32, region.width * 8, actual.ColorMode.RGB, {scaleX: 2, scaleY: 2})),
 		},
@@ -723,6 +725,144 @@ describe('computer screenshots', () => {
 		expect(screen.grabRegion).not.toHaveBeenCalled();
 		expect(execFileSync).not.toHaveBeenCalled();
 	});
+
+	it('returns image-free pixel RGBA through MCP', async () => {
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [10, 20], coordinate_space: 'desktop'});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(result.structuredContent).toEqual({
+			x: 10, y: 20, coordinate_space: 'desktop', rgba: {
+				r: 18, g: 171, b: 52, a: 255,
+			},
+		});
+		expect(result.content.map((item) => item.type)).toEqual(['text']);
+		expect(screen.grab).not.toHaveBeenCalled();
+		expect(screen.grabRegion).not.toHaveBeenCalled();
+	});
+
+	it('samples API coordinates and reports the rounded sample in the requested grid', async () => {
+		vi.mocked(screen.width).mockResolvedValue(2000);
+		vi.mocked(screen.height).mockResolvedValue(600);
+		vi.mocked(screen.colorAt).mockResolvedValueOnce(new RGBA(1, 127, 255, 128));
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [784.4, 100.6]});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(screen.colorAt).toHaveBeenCalledWith(expect.objectContaining({x: 1001, y: 128}));
+		expect(result.structuredContent).toEqual({
+			x: 785, y: 100, coordinate_space: 'api', rgba: {
+				r: 1, g: 127, b: 255, a: 128,
+			},
+		});
+	});
+
+	it('rejects missing pixel coordinates before sequence movement', async () => {
+		const result = await callComputer({
+			action: 'sequence', actions: [
+				{action: 'mouse_move', coordinate: [20, 30], coordinate_space: 'desktop'},
+				{action: 'get_pixel_color'},
+			],
+		});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([expect.objectContaining({
+			type: 'text', text: expect.stringMatching(/coordinate.*required|required.*coordinate/i),
+		})]);
+		expect(mouse.setPosition).not.toHaveBeenCalled();
+		expect(screen.colorAt).not.toHaveBeenCalled();
+	});
+
+	it('rejects out-of-bounds desktop pixels before sampling', async () => {
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [850, 20], coordinate_space: 'desktop'});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([expect.objectContaining({
+			type: 'text', text: expect.stringMatching(/display bounds/i),
+		})]);
+		expect(screen.colorAt).not.toHaveBeenCalled();
+	});
+
+	it('allows repeated pixel reads around one consequential action without returning images', async () => {
+		const result = await callComputer({
+			action: 'sequence', actions: [
+				{action: 'get_pixel_color', coordinate: [10, 20], coordinate_space: 'desktop'},
+				{action: 'left_click', coordinate: [10, 20], coordinate_space: 'desktop'},
+				{action: 'get_pixel_color', coordinate: [10, 20], coordinate_space: 'desktop'},
+			],
+		});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(result.content.map((item) => item.type)).toEqual(['text']);
+		expect(screen.colorAt).toHaveBeenCalledTimes(2);
+		expect(mouse.leftClick).toHaveBeenCalledTimes(1);
+	});
+
+	it('samples raw macOS fallback pixels through MCP', async () => {
+		await mockMacCaptureFailure(colorfulCapture(), 'colorAt');
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [10, 20], coordinate_space: 'desktop'});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(result.structuredContent).toEqual({
+			x: 10, y: 20, coordinate_space: 'desktop', rgba: {
+				r: 180, g: 40, b: 9, a: 180,
+			},
+		});
+		expect(result.content.map((item) => item.type)).toEqual(['text']);
+		expect(mouse.getPosition).not.toHaveBeenCalled();
+		expect(screen.grab).not.toHaveBeenCalled();
+		expect(rmSync).toHaveBeenCalledTimes(1);
+	});
+
+	it('samples nearest raw fallback pixels at fractional density', async () => {
+		await mockMacCaptureFailure(colorfulCapture(10, 10, 2.5), 'colorAt');
+		vi.mocked(screen.width).mockResolvedValue(4);
+		vi.mocked(screen.height).mockResolvedValue(4);
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [3, 3], coordinate_space: 'desktop'});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(result.structuredContent).toEqual({
+			x: 3, y: 3, coordinate_space: 'desktop', rgba: {
+				r: 88, g: 8, b: 0, a: 216,
+			},
+		});
+		expect(result.content.map((item) => item.type)).toEqual(['text']);
+	});
+
+	it('preserves SDK pixel-sampling failures off macOS without capture fallback', async () => {
+		vi.mocked(screen.colorAt).mockRejectedValueOnce(new Error('original SDK sampling failure'));
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [10, 20], coordinate_space: 'desktop'});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([expect.objectContaining({
+			type: 'text', text: expect.stringContaining('original SDK sampling failure'),
+		})]);
+		expect(execFileSync).not.toHaveBeenCalled();
+		expect(screen.grab).not.toHaveBeenCalled();
+	});
+
+	it('constrains nearest fallback samples to valid raw pixel bounds', async () => {
+		await mockMacCaptureFailure(colorfulCapture(2, 2, 0.5), 'colorAt');
+		vi.mocked(screen.width).mockResolvedValue(4);
+		vi.mocked(screen.height).mockResolvedValue(4);
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [3, 3], coordinate_space: 'desktop'});
+
+		expect(result.isError, JSON.stringify(result.content)).not.toBe(true);
+		expect(result.structuredContent).toEqual({
+			x: 3, y: 3, coordinate_space: 'desktop', rgba: {
+				r: 3, g: 1, b: 0, a: 131,
+			},
+		});
+	});
+
+	it('rejects unreliable pixel-sampling fallback geometry without an image', async () => {
+		await mockMacCaptureFailure(colorfulCapture(1700, 700), 'colorAt');
+		const result = await callComputer({action: 'get_pixel_color', coordinate: [10, 20], coordinate_space: 'desktop'});
+
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([expect.objectContaining({
+			type: 'text', text: expect.stringMatching(/main-display.*geometry/i),
+		})]);
+		expect(rmSync).toHaveBeenCalledTimes(1);
+	});
 });
 
 function captureRegion(capture: Image, region: nutJs.Region): Image {
@@ -744,7 +884,7 @@ function colorfulCapture(width = 1700, height = 800, density = 2): Image {
 	return new Image(width, height, pixels, 4, 'high-dpi', 32, width * 4, ColorMode.RGB, {scaleX: density, scaleY: density});
 }
 
-async function mockMacCaptureFailure(capture = colorfulCapture(), captureMethod: 'grab' | 'grabRegion' = 'grab'): Promise<Image> {
+async function mockMacCaptureFailure(capture = colorfulCapture(), captureMethod: 'grab' | 'grabRegion' | 'colorAt' = 'grab'): Promise<Image> {
 	vi.mocked(platform).mockReturnValue('darwin');
 	vi.mocked(screen[captureMethod]).mockRejectedValueOnce(new Error('SDK unavailable'));
 	vi.mocked(readFileSync).mockReturnValue(await imageToJimp(capture).getBufferAsync('image/png'));

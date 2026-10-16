@@ -1,5 +1,5 @@
 import {
-	getActiveWindow, imageToJimp, Region, screen,
+	getActiveWindow, imageToJimp, Point, Region, screen,
 } from '@nut-tree-fork/nut-js';
 import {execFileSync} from 'node:child_process';
 import {randomUUID} from 'node:crypto';
@@ -80,6 +80,21 @@ export async function resolveScreenshotRegion(desktopWidth: number, desktopHeigh
 	return region ?? {
 		left: 0, top: 0, width: desktopWidth, height: desktopHeight,
 	};
+}
+
+export async function samplePixelColor(x: number, y: number): Promise<PixelColor> {
+	try {
+		const {R, G, B, A} = await screen.colorAt(new Point(x, y));
+		return {
+			r: R, g: G, b: B, a: A,
+		};
+	} catch (error) {
+		if (platform() !== 'darwin') {
+			throw error;
+		}
+
+		return sampleFallbackPixel(x, y);
+	}
 }
 
 export function screenshotMetadata(input: ScreenshotSource) {
@@ -187,6 +202,24 @@ async function grabMainDisplayFallback(desktopWidth: number, desktopHeight: numb
 	}
 }
 
+async function sampleFallbackPixel(x: number, y: number): Promise<PixelColor> {
+	const desktopWidth = await screen.width();
+	const desktopHeight = await screen.height();
+	if (x < 0 || y < 0 || x >= desktopWidth || y >= desktopHeight) {
+		throw new Error('Pixel coordinate is outside main-display bounds');
+	}
+
+	const captured = await grabMainDisplayFallback(desktopWidth, desktopHeight);
+	const pixelX = Math.min(captured.width - 1, Math.round(x * captured.scaleX));
+	const pixelY = Math.min(captured.height - 1, Math.round(y * captured.scaleY));
+	const offset = ((pixelY * captured.width) + pixelX) * 4;
+	const pixels = captured.image.bitmap.data;
+	return {
+		r: pixels.readUInt8(offset), g: pixels.readUInt8(offset + 1),
+		b: pixels.readUInt8(offset + 2), a: pixels.readUInt8(offset + 3),
+	};
+}
+
 export type CapturedScreenshot = {
 	height: number;
 	image: ReturnType<typeof imageToJimp>;
@@ -200,6 +233,13 @@ export type DesktopRegion = {
 	top: number;
 	width: number;
 	height: number;
+};
+
+export type PixelColor = {
+	r: number;
+	g: number;
+	b: number;
+	a: number;
 };
 
 export type ScreenshotResolution = 'api' | 'native' | 'desktop';

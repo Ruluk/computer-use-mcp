@@ -78,7 +78,7 @@ If the SDK capture fails on macOS, the server uses non-interactive `screencaptur
 
 Fallback geometry is derived from the raw PNG and desktop dimensions. Empty/non-finite bounds or incompatible display/capture aspect ratios fail explicitly rather than returning guessed mappings. Native, desktop, and API modes share the same subsequent processing. Changing display geometry during a request can still cause a runtime failure.
 
-Automated checks use mocked SDK/platform/artifact operations and real PNG processing. Live Windows 1× Firefox checkpoints also verified native crop-to-desktop-click conversion and foreground-window capture through MCP, with unchanged window focus and bounds. Live macOS permissions, high-DPI, and multi-display behavior remain unverified.
+Automated checks use mocked SDK/platform/artifact operations and real PNG processing. Live Windows 1× Firefox checkpoints also verified native crop-to-desktop-click conversion, foreground-window capture with unchanged focus/bounds, and image-free known-color pixel sampling through MCP. Live macOS permissions, high-DPI, and multi-display behavior remain unverified.
 
 ### Rectangle screenshots
 
@@ -103,6 +103,24 @@ Crosshairs are positioned relative to the selected rectangle using actual output
 ```
 
 The installed SDK clips window bounds to the main display, and the capture pipeline revalidates them. This captures visible screen content in that rectangle, not hidden or occluded window pixels. Unavailable or empty targets fail without full-screen substitution. An explicit `region` cannot be combined with `active_window`; conflicts are rejected before sequence side effects. Options remain local to each screenshot step, and metadata reports the selected `target` and effective rectangle.
+
+### Raw pixel colors
+
+`get_pixel_color` requires `coordinate` and returns only JSON RGBA channels in `0..255`, with no image. Sampling uses raw desktop pixels, never annotated, resized, or palette-encoded screenshots:
+
+```json
+{"action":"get_pixel_color","coordinate":[120,80],"coordinate_space":"desktop"}
+```
+
+The reply is `{x,y,coordinate_space,rgba:{r,g,b,a}}`. Its coordinates describe the actual sampled point rounded back into the requested grid, consistent with cursor queries. Omitted/`api` inputs retain legacy scaling; desktop inputs are rounded and bounds-checked directly. `screenshot` options are not valid for pixel queries.
+
+Sampling also works in sequences without counting as a consequential action:
+
+```json
+{"action":"sequence","actions":[{"action":"wait","duration_ms":20},{"action":"get_pixel_color","coordinate":[120,80],"coordinate_space":"desktop"}]}
+```
+
+Missing coordinates are rejected before sequence side effects. If SDK sampling fails on macOS, the server samples unmodified main-display fallback pixels using verified per-axis density and nearest raw-pixel positions, constrained to the capture's valid pixel bounds. It does not annotate, resize, or palette-encode that image, and owned artifacts are cleaned before sampling. Unsupported-platform SDK failures are preserved; unreliable geometry fails explicitly.
 
 ### Coordinates
 
