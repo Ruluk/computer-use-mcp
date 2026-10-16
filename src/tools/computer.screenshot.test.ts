@@ -68,7 +68,6 @@ vi.mock('node:fs', async (importOriginal) => ({
 	...await importOriginal<typeof fileSystem>(),
 	readFileSync: vi.fn(),
 	rmSync: vi.fn(),
-	unlinkSync: vi.fn(),
 }));
 
 vi.mock('node:os', async (importOriginal) => ({

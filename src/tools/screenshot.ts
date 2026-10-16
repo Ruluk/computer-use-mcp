@@ -134,10 +134,6 @@ function assertScreenshotMapping(input: ScreenshotSource): void {
 		throw new Error('Cannot map screenshot pixels to desktop coordinates');
 	}
 
-	if (input.scaleX === undefined || input.scaleY === undefined) {
-		return;
-	}
-
 	const fullScreen = input.desktopRegion.left === 0 && input.desktopRegion.top === 0
 		&& input.desktopRegion.width === input.desktopWidth && input.desktopRegion.height === input.desktopHeight;
 	const roundingTolerance = fullScreen ? 0 : 1;
@@ -256,7 +252,7 @@ type ScreenshotSource = {
 	imageWidth: number;
 	includeCrosshair: boolean;
 	resolution: ScreenshotResolution;
-	scaleX?: number | undefined;
-	scaleY?: number | undefined;
+	scaleX: number;
+	scaleY: number;
 	target: ScreenshotTarget;
 };
